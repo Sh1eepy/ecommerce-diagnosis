@@ -86,9 +86,11 @@ curl -X POST http://127.0.0.1:8000/api/v1/diagnostics \
 
 1. **数据库层**：`agent_ro` 仅 `SELECT`（已实测写操作被拒）；Tool 全部参数化 SQL + 窗口/行数上限。
 2. **Agent 层**：工具白名单（仅 metric/funnel/dimension）、`max_steps`、单步/总 timeout、token 预算、Context 裁剪。
-3. **API 层**：`X-API-Key` 认证 + 每分钟限流 + 文件类型/大小校验。
+3. **API 层**：`X-API-Key` 认证 + 每分钟限流 + 文件类型/大小校验 + **安全响应头**（nosniff/X-Frame-Options/no-store/CSP）。
 4. **写路径隔离**：Agent 无任何写能力；数据导入/任务状态更新只走服务层。
 5. **审计**：每次工具调用写 `tool_call_log`（DB）+ `logs/tool_calls/`（JSONL），全链路 `run_id`。
+6. **密钥管理**：真实密码只存 `.env`（已被 git 忽略）；`scripts/create_users.sql` 仅含占位符；MySQL 账号密码已轮换为随机强密码。
+7. **密钥防泄漏**：`git commit` 前由 **gitleaks** 自动扫描暂存区（见 `hooks/pre-commit`，运行 `scripts/install_hooks.ps1` 安装）；历史中的旧密码已用 git-filter-repo 清除。
 
 ## 可观测性（上线排查）
 
