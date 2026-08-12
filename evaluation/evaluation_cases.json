@@ -1,0 +1,22 @@
+[
+  {
+    "case_id": "cvr-drop-001",
+    "item_id": 1,
+    "start_date": "2015-06-01",
+    "end_date": "2015-06-14",
+    "anomaly": "cvr: 支付转化率由7.00连续3天降至4.00，累计降幅42.9%（严重度 medium）",
+    "expected_tools": ["metric", "funnel"],
+    "expected_keywords": ["转化率", "成交"],
+    "note": "支付转化率连续下降：至少应查历史趋势(metric)与漏斗(funnel)定位环节"
+  },
+  {
+    "case_id": "flat-item-002",
+    "item_id": 2,
+    "start_date": "2015-06-01",
+    "end_date": "2015-06-14",
+    "anomaly": "",
+    "expected_tools": ["metric"],
+    "expected_keywords": [],
+    "note": "无异常商品：Agent 应基于数据判断无明显异常，不编造"
+  }
+]

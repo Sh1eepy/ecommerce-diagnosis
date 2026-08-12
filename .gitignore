@@ -1,0 +1,19 @@
+# 虚拟环境
+.venv/
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+# 密钥与本地配置
+.env
+# 原始数据（约1GB，不入库）
+数据/
+# 运行产物
+logs/
+feedback/agent_feedback/
+evaluation/evaluation_results.json
+*.log
+dev.db
+# IDE
+.idea/
+.vscode/
