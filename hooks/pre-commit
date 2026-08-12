@@ -1,0 +1,36 @@
+#!/bin/sh
+# ============================================================
+# gitleaks pre-commit hook：提交前扫描暂存区，发现疑似密钥则阻止提交。
+# 安装：把本文件复制到 .git/hooks/pre-commit（或运行 scripts/install_hooks.ps1）
+# 用法：git commit 时会自动执行；gitleaks 未安装时放行并提示。
+# ============================================================
+
+GITLEAKS=""
+
+# 1) 优先用 PATH 里的 gitleaks
+if command -v gitleaks >/dev/null 2>&1; then
+  GITLEAKS="gitleaks"
+fi
+
+# 2) 兜底：winget 安装目录
+if [ -z "$GITLEAKS" ]; then
+  GITLEAKS=$(ls "$LOCALAPPDATA/Microsoft/WinGet/Packages/Gitleaks.Gitleaks_"*/gitleaks.exe 2>/dev/null | head -n1)
+fi
+
+if [ -z "$GITLEAKS" ]; then
+  echo "⚠️  gitleaks 未安装，跳过密钥扫描（建议安装：winget install Gitleaks.Gitleaks）"
+  exit 0
+fi
+
+"$GITLEAKS" protect --staged --redact -v
+status=$?
+
+if [ "$status" -eq 1 ]; then
+  echo "❌ 检测到疑似密钥，提交已阻止。请移除密钥后再提交。"
+  exit 1
+elif [ "$status" -ne 0 ]; then
+  echo "⚠️  gitleaks 运行异常（退出码 $status），为避免误拦，放行本次提交。"
+  exit 0
+fi
+
+exit 0
