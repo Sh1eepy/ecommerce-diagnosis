@@ -15,6 +15,15 @@ def test_healthz():
     assert r.json()["status"] == "ok"
 
 
+def test_security_headers():
+    r = client.get("/healthz")
+    assert r.headers.get("x-content-type-options") == "nosniff"
+    assert r.headers.get("x-frame-options") == "DENY"
+    assert r.headers.get("referrer-policy") == "no-referrer"
+    assert r.headers.get("cache-control") == "no-store"
+    assert r.headers.get("content-security-policy") == "default-src 'none'"
+
+
 def test_auth_required():
     r = client.post("/api/v1/diagnostics", json={
         "item_id": 1, "start_date": "2015-06-01", "end_date": "2015-06-14"})

@@ -4,7 +4,7 @@
 """
 from __future__ import annotations
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 
 from app.api import diagnostics, files, health, tasks
 from app.db import init_db
@@ -14,6 +14,21 @@ app = FastAPI(
     description="SQL/Python 发现问题 → Agent 调查问题 → LLM 决策总结 → Tool 取证",
     version="0.1.0",
 )
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    """给所有响应加安全头（API 型项目最该加的几项）。"""
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"      # 防 MIME 类型混淆
+    response.headers["X-Frame-Options"] = "DENY"                # 防点击劫持（禁止 iframe 嵌入）
+    response.headers["Referrer-Policy"] = "no-referrer"         # 防 URL 信息经 Referer 泄露
+    response.headers["Cache-Control"] = "no-store"              # 敏感接口禁止缓存
+    response.headers["Content-Security-Policy"] = "default-src 'none'"  # 纯 JSON API 不加载任何资源
+    if request.url.scheme == "https":
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    return response
+
 
 app.include_router(health.router)
 app.include_router(diagnostics.router, prefix="/api/v1")
