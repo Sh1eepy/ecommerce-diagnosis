@@ -1,11 +1,9 @@
 # 指标口径注册表（唯一来源）
 #
-# 注意：Retailrocket 数据集无独立"曝光/点击"字段与价格字段，
-# 因此：
-#   - 漏斗使用 view → addtocart → transaction 三段
-#   - 点击率 = 独立浏览用户 / 曝光次数（代理口径）
-#   - GMV / 客单价为代理口径
-# 接入真实电商数据时，只需在本文件调整口径，无需改动代码。
+# 注意：Retailrocket 无独立"曝光/点击"字段，漏斗为 view→addtocart→transaction 三段；
+#       点击率 = 独立浏览用户/曝光（代理口径）。
+# 价格：item_properties prop=790（纯数值）提取为最新价，GMV/客单价为真实口径
+#      （V1 用最新价格近似，未按"事件当日生效价"join）。
 
 funnel_stages:
   - { name: view,        label: 曝光/浏览 }
@@ -35,8 +33,8 @@ metrics:
     label: 加购→支付转化率
     unit: "%"
   gmv:
-    label: GMV(代理=成交笔数)
-    unit: 笔
+    label: GMV(成交笔数×最新价)
+    unit: 元
   avg_price:
-    label: 客单价(代理=1件/笔)
-    unit: 件
+    label: 客单价(GMV/成交笔数)
+    unit: 元

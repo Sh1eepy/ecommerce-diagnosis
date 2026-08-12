@@ -46,6 +46,16 @@ class MetricTool(Tool):
         lines.append(f"窗口汇总: {summary['current']}")
         if summary.get("previous"):
             lines.append(f"上一等长窗口({summary['window'][0]}~): {summary['previous']}")
+
+        # 补充证据：价格 + 下架时段（item_properties 提取，未哈希字段）
+        price = compute.item_price(item_id)
+        if price:
+            lines.append(f"商品最新价格: {price:.2f}")
+        unavailable = compute.item_unavailable_periods(item_id, start, end)
+        if unavailable:
+            dates = ", ".join(u["date"] for u in unavailable)
+            lines.append(f"⚠️ 商品在窗口内存在不可用记录（available=0）: {dates} —— 这是成交骤降的直接成因线索")
+
         return {
             "ok": True,
             "text": "\n".join(lines),

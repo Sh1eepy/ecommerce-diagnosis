@@ -29,8 +29,8 @@ def metric_label(name: str) -> str:
     return all_metrics()[name]["label"]
 
 
-# 日表基础聚合列（原始量）
-BASE_COLUMNS = ["uv", "view_count", "addtocart_count", "transaction_count"]
+# 日表基础聚合列（原始量，gmv 已在导入时按"成交笔数×最新价格"落库）
+BASE_COLUMNS = ["uv", "view_count", "addtocart_count", "transaction_count", "gmv"]
 
 # 派生指标公式（r 为原始聚合行，含 BASE_COLUMNS 键）
 def _safe_div(a: float, b: float) -> float:
@@ -43,8 +43,7 @@ _DERIVED = {
     "addcart_rate": lambda r: _safe_div(r["addtocart_count"] * 100.0, r["uv"]),
     "cvr": lambda r: _safe_div(r["transaction_count"] * 100.0, r["uv"]),
     "cart_to_pay": lambda r: _safe_div(r["transaction_count"] * 100.0, r["addtocart_count"]),
-    "gmv": lambda r: float(r["transaction_count"]),
-    "avg_price": lambda r: 1.0,
+    "avg_price": lambda r: _safe_div(r.get("gmv", 0), r["transaction_count"]),
 }
 
 KNOWN_METRICS = frozenset(BASE_COLUMNS) | frozenset(_DERIVED)

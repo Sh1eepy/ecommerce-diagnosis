@@ -40,7 +40,7 @@ def validate_metrics(v, default: list[str]) -> list[str]:
 
 
 def validate_dimension(v) -> str:
-    allowed = {"day_type", "new_user", "channel", "device", "user_type", "activity"}
+    allowed = {"day_type", "new_user", "category", "channel", "device", "user_type", "activity"}
     d = str(v).strip()
     if d not in allowed:
         raise ValueError(f"不支持的维度类型: {d}（可选: {', '.join(sorted(allowed))}）")

@@ -7,7 +7,7 @@
 """
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
 
 from sqlalchemy import text
 
@@ -22,6 +22,10 @@ def _check_range(start: date, end: date) -> None:
         raise ValueError("start 不能晚于 end")
     if (end - start).days > DATE_RANGE_MAX_DAYS:
         raise ValueError(f"查询窗口超过 {DATE_RANGE_MAX_DAYS} 天上限")
+
+
+def _date_to_ms(d: date) -> int:
+    return int(datetime.combine(d, time.min).timestamp() * 1000)
 
 
 def _rows(sql: str, params: dict) -> list[dict]:
@@ -106,6 +110,27 @@ def funnel(item_id: int, start: date, end: date) -> dict:
     }
 
 
+def item_unavailable_periods(item_id: int, start: date, end: date) -> list[dict]:
+    """商品在窗口内的不可用记录（available=0 的变更点）。
+
+    available 来自 item_properties（未哈希），是"商品下架→成交骤降"的直接证据。
+    """
+    _check_range(start, end)
+    rows = _rows(
+        """SELECT ts_ms, available FROM item_availability
+           WHERE item_id=:item_id AND ts_ms BETWEEN :s AND :e AND available=0
+           ORDER BY ts_ms LIMIT 20""",
+        {"item_id": item_id, "s": _date_to_ms(start), "e": _date_to_ms(end + timedelta(days=1)) - 1},
+    )
+    return [{"date": datetime.fromtimestamp(r["ts_ms"] / 1000.0).strftime("%Y-%m-%d")} for r in rows]
+
+
+def item_price(item_id: int) -> float | None:
+    """商品最新价格（V1 近似）。"""
+    rows = _rows("SELECT price FROM item_price WHERE item_id=:item_id", {"item_id": item_id})
+    return rows[0]["price"] if rows else None
+
+
 def dimension_breakdown(
     item_id: int,
     start: date,
@@ -115,7 +140,7 @@ def dimension_breakdown(
 ) -> list[dict]:
     """按维度值拆解（channel/device/user_type/activity/day_type/new_user...）。"""
     _check_range(start, end)
-    if dimension_type not in {"day_type", "new_user", "channel", "device", "user_type", "activity"}:
+    if dimension_type not in {"day_type", "new_user", "category", "channel", "device", "user_type", "activity"}:
         raise ValueError(f"不支持的维度类型: {dimension_type}")
     cols = ", ".join(f"COALESCE(SUM({c}),0) AS {c}" for c in BASE_COLUMNS)
     rows = _rows(

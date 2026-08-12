@@ -72,6 +72,36 @@ class CategoryTree(Base):
     parent_id: Mapped[int] = mapped_column(BigInteger, default=0)
 
 
+class ItemPrice(Base):
+    """商品最新价格（prop=790，V1 用最新快照近似）。"""
+
+    __tablename__ = "item_price"
+
+    item_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    price: Mapped[float] = mapped_column(Float, default=0.0)
+    ts_ms: Mapped[int] = mapped_column(BigInteger, default=0)
+
+
+class ItemCategory(Base):
+    """商品所属类目（item_properties.categoryid，未哈希）。"""
+
+    __tablename__ = "item_category"
+
+    item_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    category_id: Mapped[int] = mapped_column(BigInteger, default=0)
+
+
+class ItemAvailability(Base):
+    """商品可用性变更日志（item_properties.available，未哈希）。"""
+
+    __tablename__ = "item_availability"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    item_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    ts_ms: Mapped[int] = mapped_column(BigInteger, default=0)
+    available: Mapped[int] = mapped_column(Integer, default=1)
+
+
 class AnomalyEvent(Base):
     """规则引擎产出的异常事件（Agent 的调查对象）。"""
 
