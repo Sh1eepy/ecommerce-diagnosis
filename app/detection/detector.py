@@ -38,6 +38,24 @@ def _fetch_series(item_id: int, metric: str, start: date, end: date) -> list[tup
         return series
 
 
+def _load_all_series(start: date, end: date) -> dict[int, list[tuple[date, dict]]]:
+    """一次性加载窗口内全部商品的日聚合行，按 item_id 分组（批量扫描，避免逐商品逐规则查询）。"""
+    sql = f"""SELECT item_id, stat_date, {', '.join(BASE_COLUMNS)}
+              FROM daily_item_stat
+              WHERE dimension_type='all' AND dimension='all'
+                AND stat_date BETWEEN :start AND :end
+              ORDER BY item_id, stat_date"""
+    groups: dict[int, list[tuple[date, dict]]] = {}
+    with get_read_engine().connect() as conn:
+        rows = conn.execute(text(sql), {"start": start, "end": end}).mappings()
+        for r in rows:
+            d = r["stat_date"]
+            if isinstance(d, str):
+                d = date.fromisoformat(d[:10])
+            groups.setdefault(r["item_id"], []).append((d, dict(r)))
+    return groups
+
+
 def detect_for_item(item_id: int, rules, start: date, end: date) -> list[RuleResult]:
     results: list[RuleResult] = []
     for rule in rules:
@@ -57,21 +75,26 @@ def _severity(change_pct: float) -> str:
 
 
 def run_detection(start: date, end: date, rules=None, limit_items: int | None = None) -> int:
-    """扫描所有商品，落库新的异常事件。同款 open 事件跳过（幂等）。"""
+    """扫描所有商品，落库新的异常事件。同款 open 事件跳过（幂等）。
+
+    性能：一次性加载窗口内全部日序列（1 次查询），Python 内按商品批量判定，
+    避免逐商品逐规则查询（V2 优化，解决全量扫描过慢）。
+    """
     rules = list(rules or DEFAULT_RULES)
-    with get_read_engine().connect() as conn:
-        sql = (
-            "SELECT DISTINCT item_id FROM daily_item_stat "
-            "WHERE dimension_type='all' ORDER BY item_id"
-        )
-        if limit_items:
-            sql += f" LIMIT {int(limit_items)}"
-        items = [r["item_id"] for r in conn.execute(text(sql)).mappings()]
+    groups = _load_all_series(start, end)
+    items = sorted(groups)
+    if limit_items:
+        items = items[:int(limit_items)]
 
     created = 0
     with write_session() as session:
         for item_id in items:
-            for res in detect_for_item(item_id, rules, start, end):
+            raw_rows = groups[item_id]
+            for rule in rules:
+                series = [(d, compute_metrics(row, [rule.metric])[rule.metric]) for d, row in raw_rows]
+                res = rule.evaluate(series)
+                if res is None:
+                    continue
                 exists = session.query(AnomalyEvent).filter_by(
                     item_id=item_id,
                     metric=res.metric,

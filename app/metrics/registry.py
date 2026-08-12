@@ -50,7 +50,11 @@ KNOWN_METRICS = frozenset(BASE_COLUMNS) | frozenset(_DERIVED)
 
 
 def compute_metrics(row: dict, names: list[str]) -> dict:
-    """从原始聚合行计算指定指标（基础列透传）。"""
+    """从原始聚合行计算指定指标（基础列透传）。
+
+    注意：MySQL 的 SUM() 返回 Decimal、SQLite 返回 int/float，
+    派生公式统一转 float 规避方言差异。
+    """
     out: dict = {}
     for name in names:
         if name not in KNOWN_METRICS:
@@ -58,5 +62,6 @@ def compute_metrics(row: dict, names: list[str]) -> dict:
         if name in BASE_COLUMNS:
             out[name] = row.get(name, 0)
         else:
-            out[name] = _DERIVED[name](row)
+            frow = {k: float(v) for k, v in row.items() if k in BASE_COLUMNS}
+            out[name] = _DERIVED[name](frow)
     return out

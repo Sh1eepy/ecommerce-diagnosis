@@ -132,5 +132,18 @@ tests/                   # pytest（SQLite 全离线）
 ## 已知口径（Retailrocket 数据）
 
 - 漏斗为 3 段：`view → addtocart → transaction`（原数据无独立曝光/点击/支付字段）
-- 点击率 = 独立浏览用户/曝光次数（代理）；GMV=成交笔数（无价格字段）；客单价=1件/笔（代理）
-- 接入真实电商数据时，改 `app/metrics/definitions.yaml` 口径即可，代码不动
+- 点击率 = 独立浏览用户/曝光次数（代理）
+- **GMV = 成交笔数 × 商品最新价格（prop=790 提取，V1 近似）；客单价 = GMV/成交笔数**（真实口径）
+- `categoryid`/`available` 未哈希 → 支持类目维度与"下架提示"；其余属性已哈希，系统不解释其含义
+- 接入其他真实电商数据时，改 `app/metrics/definitions.yaml` 口径即可，代码不动
+
+## 当前数据状态（2026-08 导入）
+
+| 表 | 行数 | 说明 |
+|---|---|---|
+| raw_events | 2,756,101 | 原始行为事件（view/addtocart/transaction） |
+| daily_item_stat | 6,812,556 | 日聚合宽表（all/day_type/new_user/category 四维度） |
+| item_price | 417,053 | 商品最新价格（prop=790） |
+| item_category | 417,053 | 商品类目 |
+| item_availability | 1,503,639 | 可用性变更日志 |
+| anomaly_event | 335 | 规则引擎产出的异常事件（近7日环比/连续下降） |
