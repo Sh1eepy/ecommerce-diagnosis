@@ -28,8 +28,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pandas as pd
+import pymysql
 from sqlalchemy import text
 
+from app.config import settings
 from app.db import get_write_engine, init_db
 
 
@@ -76,8 +78,36 @@ BASE_COLS_R = (
 )
 
 
-def load_events(engine) -> None:
-    print("[1/5] 加载 events.csv -> raw_events ...")
+def _load_events_loaddata() -> int:
+    """LOAD DATA LOCAL INFILE：MySQL 原生批量加载（比逐行 INSERT 快 10 倍以上）。"""
+    conn = pymysql.connect(
+        host=settings.DB_HOST, port=settings.DB_PORT, user=settings.DB_WRITE_USER,
+        password=settings.DB_WRITE_PASSWORD, database=settings.DB_NAME,
+        local_infile=True, charset="utf8mb4",
+    )
+    try:
+        with conn.cursor() as cur:
+            cur.execute("TRUNCATE TABLE raw_events")
+            cur.execute(
+                "LOAD DATA LOCAL INFILE %s INTO TABLE raw_events "
+                "FIELDS TERMINATED BY ',' LINES TERMINATED BY '\\n' IGNORE 1 LINES "
+                "(ts_ms, visitor_id, event, item_id, transaction_id) "
+                "SET event_date = DATE(FROM_UNIXTIME(ts_ms/1000)), "
+                "    transaction_id = REPLACE(transaction_id, '\\r', '')",
+                (str(EVENTS_CSV).replace("\\", "/"),),
+            )
+        conn.commit()
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM raw_events")
+            return cur.fetchone()[0]
+    finally:
+        conn.close()
+
+
+def _load_events_pandas() -> int:
+    """回退方案：pandas 分块 to_sql（慢但兼容性最好）。"""
+    print("   LOAD DATA 失败，回退 pandas 分块导入 ...")
+    engine = get_write_engine()
     total = 0
     for i, chunk in enumerate(pd.read_csv(EVENTS_CSV, chunksize=CHUNK, dtype={"transactionid": str})):
         df = pd.DataFrame({
@@ -91,7 +121,17 @@ def load_events(engine) -> None:
         df.to_sql("raw_events", engine, if_exists="append", index=False, method="multi", chunksize=20000)
         total += len(df)
         print(f"   chunk {i + 1}: 累计 {total} 行")
-    print(f"   事件总数: {total}")
+    return total
+
+
+def load_events(engine) -> None:
+    print("[1/5] 加载 events.csv -> raw_events（LOAD DATA LOCAL INFILE）...")
+    try:
+        n = _load_events_loaddata()
+    except Exception as e:  # noqa: BLE001
+        print(f"   LOAD DATA 失败: {type(e).__name__}: {e}")
+        n = _load_events_pandas()
+    print(f"   事件总数: {n}")
 
 
 def load_category(engine) -> None:
@@ -134,57 +174,59 @@ def build_visitor_first_seen(engine) -> None:
 
 
 def extract_item_properties(engine) -> None:
-    """从 item_properties（890MB/2000万行）提取三张表：
+    """从 item_properties（890MB/2000万行）提取三张表（pandas 向量化，只处理目标三列）：
     - item_price:        prop=790 纯数值 → 每个商品最新价格（V1 近似）
     - item_category:     categoryid（未哈希）→ 每个商品类目
     - item_availability: available（未哈希）→ 可用性变更日志
     """
-    print("[4/5] 从 item_properties 提取 价格/类目/可用性 ...")
-    price: dict[int, tuple[int, float]] = {}
-    category: dict[int, int] = {}
-    avail_rows: list[dict] = []
-
+    print("[4/5] 从 item_properties 提取 价格/类目/可用性（pandas 向量化）...")
+    keep = {PRICE_PROP, "categoryid", "available"}
+    frames = []
     for path in ITEM_PROPS_FILES:
-        with open(path, newline="", encoding="utf-8") as f:
-            r = csv.DictReader(f)
-            for row in r:
-                item = int(row["itemid"])
-                ts = int(row["timestamp"])
-                prop, val = row["property"], row["value"]
-                if prop == PRICE_PROP:
-                    m = _NUM_PAT.match(val)
-                    if m:
-                        pv = float(m.group(1))
-                        cur = price.get(item)
-                        if cur is None or ts >= cur[0]:
-                            price[item] = (ts, pv)
-                elif prop == "categoryid":
-                    if item not in category:
-                        try:
-                            category[item] = int(float(val))
-                        except (ValueError, TypeError):
-                            category[item] = 0
-                elif prop == "available":
-                    avail_rows.append({"item_id": item, "ts_ms": ts, "available": 1 if val == "1" else 0})
+        for chunk in pd.read_csv(path, chunksize=1_000_000,
+                                 dtype={"itemid": "int64", "timestamp": "int64"}):
+            frames.append(chunk[chunk["property"].isin(keep)])
+    df = pd.concat(frames, ignore_index=True)
+    del frames
+
+    # 价格：只保留纯数值 prop=790，每商品取最新一条
+    price_df = df[df["property"] == PRICE_PROP].copy()
+    num = price_df["value"].str.extract(r"^n(-?\d+)\.\d{3}$")
+    mask = num[0].notna()
+    price_df = price_df[mask]
+    price_df["price"] = num.loc[mask, 0].astype(float)
+    price_latest = (price_df.sort_values("timestamp")
+                    .groupby("itemid", sort=False).tail(1))[["itemid", "price", "timestamp"]]
+
+    # 类目：每商品取第一条 categoryid
+    cat_df = df[df["property"] == "categoryid"].copy()
+    cat_df["category_id"] = pd.to_numeric(cat_df["value"], errors="coerce").fillna(0).astype(int)
+    cat_latest = cat_df.groupby("itemid", sort=False).first()[["category_id"]].reset_index()
+
+    # 可用性：全部变更日志
+    avail_df = df[df["property"] == "available"][["itemid", "timestamp", "value"]].copy()
+    avail_df["available"] = (avail_df["value"] == "1").astype(int)
 
     with engine.begin() as conn:
         for t in ("item_price", "item_category", "item_availability"):
             conn.execute(text(f"TRUNCATE TABLE {t}"))
         conn.execute(
             text("INSERT INTO item_price (item_id, price, ts_ms) VALUES (:item_id, :price, :ts_ms)"),
-            [{"item_id": k, "price": v[1], "ts_ms": v[0]} for k, v in price.items()],
+            [{"item_id": int(r.itemid), "price": float(r.price), "ts_ms": int(r.timestamp)}
+             for r in price_latest.itertuples()],
         )
         conn.execute(
             text("INSERT INTO item_category (item_id, category_id) VALUES (:item_id, :category_id)"),
-            [{"item_id": k, "category_id": v} for k, v in category.items()],
+            [{"item_id": int(r.itemid), "category_id": int(r.category_id)} for r in cat_latest.itertuples()],
         )
-        # 分批写可用性日志，避免一次 exec 太大
+        avail_rows = [{"item_id": int(r.itemid), "ts_ms": int(r.timestamp), "available": int(r.available)}
+                      for r in avail_df.itertuples()]
         for i in range(0, len(avail_rows), 50000):
             conn.execute(
                 text("INSERT INTO item_availability (item_id, ts_ms, available) VALUES (:item_id, :ts_ms, :available)"),
                 avail_rows[i:i + 50000],
             )
-    print(f"   价格 {len(price)} 项，类目 {len(category)} 项，可用性变更 {len(avail_rows)} 条")
+    print(f"   价格 {len(price_latest)} 项，类目 {len(cat_latest)} 项，可用性变更 {len(avail_rows)} 条")
 
 
 def aggregate_daily(engine) -> None:

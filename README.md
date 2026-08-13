@@ -51,6 +51,8 @@ pip install -r requirements.txt
 
 # 3. 初始化数据库与账号（root 执行一次）
 mysql -h 127.0.0.1 -P 3309 -u root -p < scripts\create_users.sql
+# 开启 LOAD DATA LOCAL INFILE（导入提速用，root 执行一次；重启后需重开）
+mysql -h 127.0.0.1 -P 3309 -u root -p -e "SET GLOBAL local_infile = 1"
 
 # 4. 导入 Retailrocket 数据（约 2.76M 事件）
 python scripts\import_retailrocket.py
