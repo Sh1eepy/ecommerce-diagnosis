@@ -21,6 +21,7 @@ from app.agent.context import (
 )
 from app.agent.tool import ToolRegistry
 from app.agent.workflow import Workflow
+from app.alerting import send_diagnosis_alert
 from app.config import settings
 from app.db import write_session
 from app.llm import get_llm, LLMClient
@@ -94,6 +95,8 @@ class Agent:
         tool_calls = 0
         tokens_in = 0
         tokens_out = 0
+        llm_calls = 0
+        llm_duration_ms = 0
         nudges = 0
         stop_reason = ""
         report = None
@@ -116,6 +119,8 @@ class Agent:
                 stop_reason = STOP_LLM_ERROR
                 break
             latency = (time.perf_counter() - t0) * 1000.0
+            llm_calls += 1
+            llm_duration_ms += int(latency)
             tokens_in += resp.tokens_in
             tokens_out += resp.tokens_out
             log_agent_step(
@@ -179,10 +184,14 @@ class Agent:
         duration_ms = int((time.perf_counter() - started) * 1000)
         self._persist(
             run_id, item_id, start, end, anomaly_id, stop_reason,
-            steps, tool_calls, tokens_in, tokens_out, duration_ms, error, report, tool_logs,
+            steps, tool_calls, tokens_in, tokens_out,
+            llm_calls, llm_duration_ms, duration_ms, error, report, tool_logs,
         )
-        return {
+        result = {
             "run_id": run_id,
+            "item_id": item_id,
+            "window": [str(start), str(end)],
+            "anomaly_id": anomaly_id,
             "status": "ok" if not error else "error",
             "stop_reason": stop_reason,
             "report": report,
@@ -191,9 +200,15 @@ class Agent:
             "tools_used": used_tools,
             "model": self.llm.model,
         }
+        try:
+            send_diagnosis_alert(result)
+        except Exception as e:  # noqa: BLE001  告警失败不影响诊断结果
+            log_agent_step(run_id, steps, "alert_error", str(e)[:200])
+        return result
 
     def _persist(self, run_id, item_id, start, end, anomaly_id, stop_reason,
-                 steps, tool_calls, tokens_in, tokens_out, duration_ms, error, report, tool_logs):
+                 steps, tool_calls, tokens_in, tokens_out,
+                 llm_calls, llm_duration_ms, duration_ms, error, report, tool_logs):
         with write_session() as s:
             s.add(AgentRun(
                 run_id=run_id, item_id=item_id,
@@ -202,6 +217,7 @@ class Agent:
                 status="succeeded" if not error else "error",
                 steps=steps, tool_calls=tool_calls,
                 tokens_in=tokens_in, tokens_out=tokens_out,
+                llm_calls=llm_calls, llm_duration_ms=llm_duration_ms,
                 duration_ms=duration_ms, error=error,
             ))
             for tl in tool_logs:

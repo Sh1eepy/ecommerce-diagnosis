@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from fastapi import FastAPI, Request
 
-from app.api import diagnostics, files, health, tasks
+from app.api import diagnostics, files, health, monitoring, tasks
 from app.db import init_db
 
 app = FastAPI(
@@ -34,6 +34,7 @@ app.include_router(health.router)
 app.include_router(diagnostics.router, prefix="/api/v1")
 app.include_router(tasks.router, prefix="/api/v1")
 app.include_router(files.router, prefix="/api/v1")
+app.include_router(monitoring.router, prefix="/api/v1")
 
 
 @app.on_event("startup")

@@ -39,6 +39,10 @@ class Settings(BaseSettings):
     TOOL_RESULT_MAX_CHARS: int = 4000
     LOG_DIR: str = "./logs"
 
+    # ---- 告警 Webhook（留空 = 不发送）----
+    ALERT_WEBHOOK_URL: str = ""
+    ALERT_WEBHOOK_SECRET: str = ""
+
     # ---- API 安全 ----
     API_KEYS: str = "dev-key-123"
     API_RATE_LIMIT_PER_MINUTE: int = 60

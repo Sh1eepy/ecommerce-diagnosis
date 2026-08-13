@@ -91,3 +91,13 @@ def test_feedback():
     r = client.post("/api/v1/feedback", headers=HEADERS, json={
         "run_id": "abc123", "rating": 2, "category": "analysis", "comment": "结论不准"})
     assert r.status_code == 200
+
+
+def test_monitoring_endpoint():
+    r = client.get("/api/v1/monitoring?window_hours=24", headers=HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert "agent_runs" in body and "tool_calls" in body and "tasks" in body
+    # 未带 Key 应 401
+    r2 = client.get("/api/v1/monitoring")
+    assert r2.status_code == 401
