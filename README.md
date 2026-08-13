@@ -126,12 +126,13 @@ tests/                   # pytest（SQLite 全离线）
 
 ## 里程碑
 
-- [x] V1：数据层 + 规则检测 + Agent Loop + 3 Tool（MockLLM 离线跑通）
+- [x] V1：数据层 + 规则检测 + Agent Loop + 4 Tool（MockLLM 离线跑通）
 - [x] V2：Workflow + 权限（白名单/max_steps/timeout/只读账号/审计）
 - [x] V3：REST API + 文件导入 + DB 任务队列 + Worker
 - [x] V4：并发限制/重试/幂等/优先级（`app/tasks/`）
 - [x] V5：评估（evaluation/）+ 反馈（feedback/）
-- [ ] 后续：告警 Webhook、Redis/Celery 队列、指标监控面板
+- [x] P0-P3 增强：PeerTool 跨商品对比、类目级异常聚合、真实 LLM 评估基线、告警 Webhook、监控指标、导入提速 7 倍
+- [ ] 后续：价格按日生效 join、Redis/Celery 队列、多 Worker 副本、指标监控面板
 
 ## 已知口径（Retailrocket 数据）
 
