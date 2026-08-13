@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import pytest  # noqa: E402
 
 from app.db import get_write_engine, init_db, write_session  # noqa: E402
-from app.models import DailyItemStat  # noqa: E402
+from app.models import DailyItemStat, ItemCategory, ItemPrice  # noqa: E402
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -68,4 +68,16 @@ def _seed_daily_stats() -> None:
                     addtocart_count=add - new_add, transaction_count=trans - trans // 2,
                     gmv=float(trans - trans // 2),
                 ))
+
+                # category 维度（两个商品同属类目 100，数据与 all 一致）
+                s.add(DailyItemStat(
+                    item_id=item, stat_date=d, dimension_type="category", dimension="100",
+                    uv=uv, view_count=view, click_count=view,
+                    addtocart_count=add, transaction_count=trans, gmv=float(trans),
+                ))
+
+        s.add(ItemCategory(item_id=1, category_id=100))
+        s.add(ItemCategory(item_id=2, category_id=100))
+        s.add(ItemPrice(item_id=1, price=100.0, ts_ms=0))
+        s.add(ItemPrice(item_id=2, price=50.0, ts_ms=0))
         s.commit()

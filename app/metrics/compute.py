@@ -155,3 +155,68 @@ def dimension_breakdown(
     for r in rows:
         out.append({"dimension": r["dimension"], **compute_metrics(r, metric_names)})
     return out
+
+
+def item_category_id(item_id: int) -> int | None:
+    """商品所属类目（item_category，未哈希的 categoryid）。"""
+    rows = _rows("SELECT category_id FROM item_category WHERE item_id=:item_id", {"item_id": item_id})
+    return int(rows[0]["category_id"]) if rows else None
+
+
+def _agg_over_window(cols_sql: str, where_sql: str, params: dict) -> dict:
+    rows = _rows(
+        f"SELECT {cols_sql} FROM daily_item_stat WHERE {where_sql}",
+        params,
+    )
+    return rows[0] if rows else {}
+
+
+def category_total_raw(category_id: int, start: date, end: date) -> dict:
+    """类目整体在窗口内的原始聚合行（SUM 各基础列）。"""
+    cols = ", ".join(f"COALESCE(SUM({c}),0) AS {c}" for c in BASE_COLUMNS)
+    return _agg_over_window(
+        cols,
+        "dimension_type='category' AND dimension=:cat AND stat_date BETWEEN :start AND :end",
+        {"cat": str(category_id), "start": start, "end": end},
+    )
+
+
+def category_summary(category_id: int, start: date, end: date, metric_names: list[str]) -> dict:
+    """类目整体指标（计算派生指标）。"""
+    _check_range(start, end)
+    return compute_metrics(category_total_raw(category_id, start, end), metric_names)
+
+
+def item_summary_raw(item_id: int, start: date, end: date) -> dict:
+    """商品自身在窗口内的原始聚合行（用于从类目总量中扣减）。"""
+    cols = ", ".join(f"COALESCE(SUM({c}),0) AS {c}" for c in BASE_COLUMNS)
+    return _agg_over_window(
+        cols,
+        "item_id=:item_id AND dimension_type='all' AND dimension='all' AND stat_date BETWEEN :start AND :end",
+        {"item_id": item_id, "start": start, "end": end},
+    )
+
+
+def peers_stats(item_id: int, start: date, end: date, metric_names: list[str]) -> dict | None:
+    """同类目排除自身后的同行汇总指标；无类目返回 None。"""
+    cat = item_category_id(item_id)
+    if cat is None:
+        return None
+    cat_row = category_total_raw(cat, start, end)
+    own_row = item_summary_raw(item_id, start, end)
+    peer_row = {c: cat_row.get(c, 0) - own_row.get(c, 0) for c in BASE_COLUMNS}
+    return {"category_id": cat, "peers": compute_metrics(peer_row, metric_names)}
+
+
+def peer_items(category_id: int, start: date, end: date, limit: int = 5) -> list[dict]:
+    """同类目 UV TOP N 商品列表（对照样本）。"""
+    rows = _rows(
+        """SELECT s.item_id, SUM(s.uv) AS uv
+           FROM daily_item_stat s
+           JOIN item_category ic ON ic.item_id = s.item_id AND ic.category_id = :cat
+           WHERE s.dimension_type='all' AND s.dimension='all'
+             AND s.stat_date BETWEEN :start AND :end
+           GROUP BY s.item_id ORDER BY uv DESC LIMIT :lim""",
+        {"cat": category_id, "start": start, "end": end, "lim": int(limit)},
+    )
+    return [{"item_id": int(r["item_id"]), "uv": int(r["uv"] or 0)} for r in rows]

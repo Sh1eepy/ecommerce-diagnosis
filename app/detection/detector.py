@@ -74,17 +74,76 @@ def _severity(change_pct: float) -> str:
     return "low"
 
 
-def run_detection(start: date, end: date, rules=None, limit_items: int | None = None) -> int:
-    """扫描所有商品，落库新的异常事件。同款 open 事件跳过（幂等）。
+def _load_all_category_series(start: date, end: date) -> dict[int, list[tuple[date, dict]]]:
+    """一次性加载窗口内全部类目切片（dimension_type='category'）的日聚合行。
 
-    性能：一次性加载窗口内全部日序列（1 次查询），Python 内按商品批量判定，
-    避免逐商品逐规则查询（V2 优化，解决全量扫描过慢）。
+    注意：category 维度按 (商品,日期) 存储，同一类目每天有多行 → 按 (类目,日期) SUM 聚合。
+    排除 'unknown' 占位类目；dimension 存的是字符串类目 ID，转 int。
+    """
+    cols = ", ".join(f"SUM({c}) AS {c}" for c in BASE_COLUMNS)
+    sql = f"""SELECT dimension, stat_date, {cols}
+              FROM daily_item_stat
+              WHERE dimension_type='category' AND dimension != 'unknown'
+                AND stat_date BETWEEN :start AND :end
+              GROUP BY dimension, stat_date
+              ORDER BY dimension, stat_date"""
+    groups: dict[int, list[tuple[date, dict]]] = {}
+    with get_read_engine().connect() as conn:
+        rows = conn.execute(text(sql), {"start": start, "end": end}).mappings()
+        for r in rows:
+            try:
+                cat = int(r["dimension"])
+            except (ValueError, TypeError):
+                continue
+            d = r["stat_date"]
+            if isinstance(d, str):
+                d = date.fromisoformat(d[:10])
+            groups.setdefault(cat, []).append((d, dict(r)))
+    return groups
+
+
+def _add_anomaly(session, item_id: int | None, category_id: int | None, rule, res: RuleResult) -> int:
+    """幂等插入一条异常事件；已存在同款 open 事件则返回 0，新插入返回 1。"""
+    exists = session.query(AnomalyEvent).filter_by(
+        item_id=item_id if item_id is not None else 0,
+        category_id=category_id,
+        metric=res.metric,
+        rule_id=res.rule_id,
+        date_end=res.date_end,
+        status="open",
+    ).first()
+    if exists:
+        return 0
+    session.add(AnomalyEvent(
+        item_id=item_id if item_id is not None else 0,
+        category_id=category_id,
+        metric=res.metric,
+        rule_id=res.rule_id,
+        rule_name=res.rule_name,
+        date_start=res.date_start,
+        date_end=res.date_end,
+        baseline_value=res.baseline_value,
+        current_value=res.current_value,
+        change_pct=res.change_pct,
+        severity=_severity(res.change_pct),
+        description=res.description,
+    ))
+    return 1
+
+
+def run_detection(start: date, end: date, rules=None, limit_items: int | None = None,
+                  include_categories: bool = True) -> int:
+    """扫描所有商品（+ 类目切片）并落库新的异常事件。同款 open 事件跳过（幂等）。
+
+    性能：一次性加载窗口内全部日序列（1 次查询），Python 内按商品/类目批量判定。
+    类目级异常：item_id=0 + category_id=类目ID，表示"整个类目带崩"。
     """
     rules = list(rules or DEFAULT_RULES)
     groups = _load_all_series(start, end)
     items = sorted(groups)
     if limit_items:
         items = items[:int(limit_items)]
+    cat_groups = _load_all_category_series(start, end) if include_categories else {}
 
     created = 0
     with write_session() as session:
@@ -93,30 +152,15 @@ def run_detection(start: date, end: date, rules=None, limit_items: int | None = 
             for rule in rules:
                 series = [(d, compute_metrics(row, [rule.metric])[rule.metric]) for d, row in raw_rows]
                 res = rule.evaluate(series)
-                if res is None:
-                    continue
-                exists = session.query(AnomalyEvent).filter_by(
-                    item_id=item_id,
-                    metric=res.metric,
-                    rule_id=res.rule_id,
-                    date_end=res.date_end,
-                    status="open",
-                ).first()
-                if exists:
-                    continue
-                session.add(AnomalyEvent(
-                    item_id=item_id,
-                    metric=res.metric,
-                    rule_id=res.rule_id,
-                    rule_name=res.rule_name,
-                    date_start=res.date_start,
-                    date_end=res.date_end,
-                    baseline_value=res.baseline_value,
-                    current_value=res.current_value,
-                    change_pct=res.change_pct,
-                    severity=_severity(res.change_pct),
-                    description=res.description,
-                ))
-                created += 1
+                if res is not None:
+                    created += _add_anomaly(session, item_id, None, rule, res)
+
+        for cat, raw_rows in cat_groups.items():
+            for rule in rules:
+                series = [(d, compute_metrics(row, [rule.metric])[rule.metric]) for d, row in raw_rows]
+                res = rule.evaluate(series)
+                if res is not None:
+                    created += _add_anomaly(session, None, cat, rule, res)
+
         session.commit()
     return created

@@ -109,6 +109,7 @@ class AnomalyEvent(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     item_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    category_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, default=None)
     metric: Mapped[str] = mapped_column(String(32), index=True)
     rule_id: Mapped[str] = mapped_column(String(64))
     rule_name: Mapped[str] = mapped_column(String(64))
