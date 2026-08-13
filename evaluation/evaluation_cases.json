@@ -1,22 +1,266 @@
 [
   {
-    "case_id": "cvr-drop-001",
-    "item_id": 1,
-    "start_date": "2015-06-01",
-    "end_date": "2015-06-14",
-    "anomaly": "cvr: 支付转化率由7.00连续3天降至4.00，累计降幅42.9%（严重度 medium）",
-    "expected_tools": ["metric", "funnel"],
-    "expected_keywords": ["转化率", "成交"],
-    "note": "支付转化率连续下降：至少应查历史趋势(metric)与漏斗(funnel)定位环节"
+    "case_id": "real-12217-cvr",
+    "item_id": 12217,
+    "start_date": "2015-09-08",
+    "end_date": "2015-09-17",
+    "anomaly": "cvr 近7日均值 0.00，较上一同长窗口 1.43 下降 100.0%",
+    "expected_tools": [
+      "metric",
+      "funnel"
+    ],
+    "expected_keywords": [
+      "转化率",
+      "cvr",
+      "CVR",
+      "支付转化"
+    ],
+    "note": "真实异常采样"
   },
   {
-    "case_id": "flat-item-002",
-    "item_id": 2,
-    "start_date": "2015-06-01",
-    "end_date": "2015-06-14",
-    "anomaly": "",
-    "expected_tools": ["metric"],
-    "expected_keywords": [],
-    "note": "无异常商品：Agent 应基于数据判断无明显异常，不编造"
+    "case_id": "real-12217-gmv",
+    "item_id": 12217,
+    "start_date": "2015-09-08",
+    "end_date": "2015-09-17",
+    "anomaly": "gmv 近7日均值 0.00，较上一同长窗口 13217.14 下降 100.0%",
+    "expected_tools": [
+      "metric",
+      "funnel"
+    ],
+    "expected_keywords": [
+      "GMV",
+      "gmv",
+      "销售额"
+    ],
+    "note": "真实异常采样"
+  },
+  {
+    "case_id": "real-17114-uv",
+    "item_id": 17114,
+    "start_date": "2015-09-12",
+    "end_date": "2015-09-18",
+    "anomaly": "uv 由 238.00 连续3天降至 1.00，累计降幅 99.6%",
+    "expected_tools": [
+      "metric",
+      "funnel"
+    ],
+    "expected_keywords": [
+      "UV",
+      "uv",
+      "流量",
+      "访客"
+    ],
+    "note": "真实异常采样"
+  },
+  {
+    "case_id": "real-46232-gmv",
+    "item_id": 46232,
+    "start_date": "2015-09-07",
+    "end_date": "2015-09-16",
+    "anomaly": "gmv 近7日均值 6445.71，较上一同长窗口 12891.43 下降 50.0%",
+    "expected_tools": [
+      "metric",
+      "funnel"
+    ],
+    "expected_keywords": [
+      "GMV",
+      "gmv",
+      "销售额"
+    ],
+    "note": "真实异常采样"
+  },
+  {
+    "case_id": "real-76060-cvr",
+    "item_id": 76060,
+    "start_date": "2015-09-09",
+    "end_date": "2015-09-18",
+    "anomaly": "cvr 近7日均值 0.00，较上一同长窗口 0.12 下降 100.0%",
+    "expected_tools": [
+      "metric",
+      "funnel"
+    ],
+    "expected_keywords": [
+      "转化率",
+      "cvr",
+      "CVR",
+      "支付转化"
+    ],
+    "note": "真实异常采样"
+  },
+  {
+    "case_id": "real-76060-gmv",
+    "item_id": 76060,
+    "start_date": "2015-09-09",
+    "end_date": "2015-09-18",
+    "anomaly": "gmv 近7日均值 0.00，较上一同长窗口 6685.71 下降 100.0%",
+    "expected_tools": [
+      "metric",
+      "funnel"
+    ],
+    "expected_keywords": [
+      "GMV",
+      "gmv",
+      "销售额"
+    ],
+    "note": "真实异常采样"
+  },
+  {
+    "case_id": "real-99187-cvr",
+    "item_id": 99187,
+    "start_date": "2015-09-09",
+    "end_date": "2015-09-18",
+    "anomaly": "cvr 近7日均值 0.00，较上一同长窗口 7.14 下降 100.0%",
+    "expected_tools": [
+      "metric",
+      "funnel"
+    ],
+    "expected_keywords": [
+      "转化率",
+      "cvr",
+      "CVR",
+      "支付转化"
+    ],
+    "note": "真实异常采样"
+  },
+  {
+    "case_id": "real-99187-gmv",
+    "item_id": 99187,
+    "start_date": "2015-09-09",
+    "end_date": "2015-09-18",
+    "anomaly": "gmv 近7日均值 0.00，较上一同长窗口 14571.43 下降 100.0%",
+    "expected_tools": [
+      "metric",
+      "funnel"
+    ],
+    "expected_keywords": [
+      "GMV",
+      "gmv",
+      "销售额"
+    ],
+    "note": "真实异常采样"
+  },
+  {
+    "case_id": "real-112782-cvr",
+    "item_id": 112782,
+    "start_date": "2015-09-08",
+    "end_date": "2015-09-17",
+    "anomaly": "cvr 近7日均值 0.00，较上一同长窗口 3.57 下降 100.0%",
+    "expected_tools": [
+      "metric",
+      "funnel"
+    ],
+    "expected_keywords": [
+      "转化率",
+      "cvr",
+      "CVR",
+      "支付转化"
+    ],
+    "note": "真实异常采样"
+  },
+  {
+    "case_id": "real-112782-gmv",
+    "item_id": 112782,
+    "start_date": "2015-09-08",
+    "end_date": "2015-09-17",
+    "anomaly": "gmv 近7日均值 0.00，较上一同长窗口 29108.57 下降 100.0%",
+    "expected_tools": [
+      "metric",
+      "funnel"
+    ],
+    "expected_keywords": [
+      "GMV",
+      "gmv",
+      "销售额"
+    ],
+    "note": "真实异常采样"
+  },
+  {
+    "case_id": "real-122604-uv",
+    "item_id": 122604,
+    "start_date": "2015-09-12",
+    "end_date": "2015-09-18",
+    "anomaly": "uv 由 7.00 连续3天降至 1.00，累计降幅 85.7%",
+    "expected_tools": [
+      "metric",
+      "funnel"
+    ],
+    "expected_keywords": [
+      "UV",
+      "uv",
+      "流量",
+      "访客"
+    ],
+    "note": "真实异常采样"
+  },
+  {
+    "case_id": "real-122604-cvr",
+    "item_id": 122604,
+    "start_date": "2015-09-09",
+    "end_date": "2015-09-18",
+    "anomaly": "cvr 近7日均值 0.00，较上一同长窗口 4.59 下降 100.0%",
+    "expected_tools": [
+      "metric",
+      "funnel"
+    ],
+    "expected_keywords": [
+      "转化率",
+      "cvr",
+      "CVR",
+      "支付转化"
+    ],
+    "note": "真实异常采样"
+  },
+  {
+    "case_id": "real-122604-gmv",
+    "item_id": 122604,
+    "start_date": "2015-09-09",
+    "end_date": "2015-09-18",
+    "anomaly": "gmv 近7日均值 0.00，较上一同长窗口 94251.43 下降 100.0%",
+    "expected_tools": [
+      "metric",
+      "funnel"
+    ],
+    "expected_keywords": [
+      "GMV",
+      "gmv",
+      "销售额"
+    ],
+    "note": "真实异常采样"
+  },
+  {
+    "case_id": "real-153778-cvr",
+    "item_id": 153778,
+    "start_date": "2015-09-08",
+    "end_date": "2015-09-17",
+    "anomaly": "cvr 近7日均值 3.50，较上一同长窗口 6.07 下降 42.3%",
+    "expected_tools": [
+      "metric",
+      "funnel"
+    ],
+    "expected_keywords": [
+      "转化率",
+      "cvr",
+      "CVR",
+      "支付转化"
+    ],
+    "note": "真实异常采样"
+  },
+  {
+    "case_id": "real-187946-uv",
+    "item_id": 187946,
+    "start_date": "2015-09-12",
+    "end_date": "2015-09-18",
+    "anomaly": "uv 由 32.00 连续3天降至 1.00，累计降幅 96.9%",
+    "expected_tools": [
+      "metric",
+      "funnel"
+    ],
+    "expected_keywords": [
+      "UV",
+      "uv",
+      "流量",
+      "访客"
+    ],
+    "note": "真实异常采样"
   }
 ]
