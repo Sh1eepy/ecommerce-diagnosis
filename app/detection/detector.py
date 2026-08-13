@@ -1,7 +1,7 @@
 """异常检测器：扫描商品 → 跑规则 → 写入 anomaly_event（幂等）。"""
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 from sqlalchemy import text
 
@@ -102,8 +102,8 @@ def _load_all_category_series(start: date, end: date) -> dict[int, list[tuple[da
     return groups
 
 
-def _add_anomaly(session, item_id: int | None, category_id: int | None, rule, res: RuleResult) -> int:
-    """幂等插入一条异常事件；已存在同款 open 事件则返回 0，新插入返回 1。"""
+def _add_anomaly(session, item_id: int | None, category_id: int | None, rule, res: RuleResult) -> AnomalyEvent | None:
+    """幂等插入一条异常事件；已存在同款 open 事件则返回 None，新插入返回该事件（含 id）。"""
     exists = session.query(AnomalyEvent).filter_by(
         item_id=item_id if item_id is not None else 0,
         category_id=category_id,
@@ -113,8 +113,8 @@ def _add_anomaly(session, item_id: int | None, category_id: int | None, rule, re
         status="open",
     ).first()
     if exists:
-        return 0
-    session.add(AnomalyEvent(
+        return None
+    anom = AnomalyEvent(
         item_id=item_id if item_id is not None else 0,
         category_id=category_id,
         metric=res.metric,
@@ -127,16 +127,20 @@ def _add_anomaly(session, item_id: int | None, category_id: int | None, rule, re
         change_pct=res.change_pct,
         severity=_severity(res.change_pct),
         description=res.description,
-    ))
-    return 1
+    )
+    session.add(anom)
+    session.flush()  # 立即取到自增 id（供自动诊断任务使用）
+    return anom
 
 
 def run_detection(start: date, end: date, rules=None, limit_items: int | None = None,
-                  include_categories: bool = True) -> int:
+                  include_categories: bool = True, auto_diagnose: bool = True) -> int:
     """扫描所有商品（+ 类目切片）并落库新的异常事件。同款 open 事件跳过（幂等）。
 
     性能：一次性加载窗口内全部日序列（1 次查询），Python 内按商品/类目批量判定。
     类目级异常：item_id=0 + category_id=类目ID，表示"整个类目带崩"。
+    auto_diagnose=True 时，为新产生的【商品级】异常自动创建诊断任务（类目级暂不诊断，
+    因为 Agent 的工具是商品级）。幂等：重复检测不产生新异常，也就不产生新任务。
     """
     rules = list(rules or DEFAULT_RULES)
     groups = _load_all_series(start, end)
@@ -145,7 +149,7 @@ def run_detection(start: date, end: date, rules=None, limit_items: int | None = 
         items = items[:int(limit_items)]
     cat_groups = _load_all_category_series(start, end) if include_categories else {}
 
-    created = 0
+    new_anomalies: list[AnomalyEvent] = []
     with write_session() as session:
         for item_id in items:
             raw_rows = groups[item_id]
@@ -153,14 +157,47 @@ def run_detection(start: date, end: date, rules=None, limit_items: int | None = 
                 series = [(d, compute_metrics(row, [rule.metric])[rule.metric]) for d, row in raw_rows]
                 res = rule.evaluate(series)
                 if res is not None:
-                    created += _add_anomaly(session, item_id, None, rule, res)
+                    anom = _add_anomaly(session, item_id, None, rule, res)
+                    if anom:
+                        new_anomalies.append(anom)
 
         for cat, raw_rows in cat_groups.items():
             for rule in rules:
                 series = [(d, compute_metrics(row, [rule.metric])[rule.metric]) for d, row in raw_rows]
                 res = rule.evaluate(series)
                 if res is not None:
-                    created += _add_anomaly(session, None, cat, rule, res)
+                    anom = _add_anomaly(session, None, cat, rule, res)
+                    if anom:
+                        new_anomalies.append(anom)
 
         session.commit()
+
+    if auto_diagnose:
+        _create_diagnosis_tasks(new_anomalies)
+    return len(new_anomalies)
+
+
+def _create_diagnosis_tasks(new_anomalies: list[AnomalyEvent]) -> int:
+    """为新异常自动创建诊断任务（懒加载 create_task，避免检测器背上整条 Agent 依赖链）。
+
+    类目级异常（item_id=0）跳过：Agent 的工具（metric/funnel/dimension/peer）都是商品级。
+    """
+    from app.tasks.queue import create_task  # 懒加载，避免循环/重依赖
+
+    created = 0
+    for anom in new_anomalies:
+        if anom.item_id == 0:
+            continue
+        create_task(
+            "diagnose",
+            payload={
+                "item_id": anom.item_id,
+                "start_date": str(anom.date_start - timedelta(days=3)),
+                "end_date": str(anom.date_end),
+                "anomaly": anom.description,
+            },
+            anomaly_id=anom.id,
+            idempotency_key=f"diag-anom:{anom.id}",
+        )
+        created += 1
     return created

@@ -57,7 +57,7 @@ mysql -h 127.0.0.1 -P 3309 -u root -p -e "SET GLOBAL local_infile = 1"
 # 4. 导入 Retailrocket 数据（约 2.76M 事件）
 python scripts\import_retailrocket.py
 
-# 5. 运行异常检测（生成 anomaly_event）
+# 5. 运行异常检测（生成 anomaly_event 并自动创建诊断任务）
 python scripts\run_detection.py
 
 # 6. 启动 API
@@ -65,6 +65,9 @@ uvicorn app.api.main:app --reload --port 8000
 
 # 7. 启动 Worker（消费任务队列，另开终端）
 python scripts\run_worker.py
+
+# 8. 启动调度器（每天 00:00 自动检测+入队诊断，全自动闭环；另开终端）
+python scripts\run_scheduler.py
 ```
 
 ## API 一览（前缀 `/api/v1`，需 `X-API-Key` 头）
