@@ -48,7 +48,20 @@ jobs:
             https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_linux_x64.tar.gz
           tar -xzf /tmp/gitleaks.tar.gz -C /tmp
           sudo mv /tmp/gitleaks /usr/local/bin/
-          gitleaks detect --source . --no-banner --redact
+          # 自动读取仓库根 .gitleaks.toml（白名单误报项）
+          # 输出 JSON 报告；有泄漏时打印 RuleID/文件:行号（Secret 已打码，不暴露内容）
+          gitleaks detect --source . --no-banner --redact \
+            --report-format json --report-path gitleaks-report.json || true
+          if [ -f gitleaks-report.json ] && [ -s gitleaks-report.json ]; then
+            echo "===== gitleaks 检测到泄漏（RuleID | 文件:行号）====="
+            python -c "
+import json
+for f in json.load(open('gitleaks-report.json')):
+    print(f\"{f.get('RuleID','?')} | {f.get('File','?')}:{f.get('StartLine','?')}\")
+"
+            exit 1
+          fi
+          echo "gitleaks: 无泄漏 ✓"
 
       - name: 依赖漏洞扫描（pip-audit）
         run: pip-audit
