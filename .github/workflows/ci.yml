@@ -49,19 +49,8 @@ jobs:
           tar -xzf /tmp/gitleaks.tar.gz -C /tmp
           sudo mv /tmp/gitleaks /usr/local/bin/
           # 自动读取仓库根 .gitleaks.toml（白名单误报项）
-          # 输出 JSON 报告；有泄漏时打印 RuleID/文件:行号（Secret 已打码，不暴露内容）
-          gitleaks detect --source . --no-banner --redact \
-            --report-format json --report-path gitleaks-report.json || true
-          if [ -f gitleaks-report.json ] && [ -s gitleaks-report.json ]; then
-            echo "===== gitleaks 检测到泄漏（RuleID | 文件:行号）====="
-            python -c "
-import json
-for f in json.load(open('gitleaks-report.json')):
-    print(f\"{f.get('RuleID','?')} | {f.get('File','?')}:{f.get('StartLine','?')}\")
-"
-            exit 1
-          fi
-          echo "gitleaks: 无泄漏 ✓"
+          # -v 详细模式：有泄漏时 findings（RuleID/文件:行号/打码 Secret）直接打印到日志，退出码 1 使步骤失败
+          gitleaks detect --source . --no-banner --redact -v
 
       - name: 依赖漏洞扫描（pip-audit）
         run: pip-audit
