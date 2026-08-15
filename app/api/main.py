@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from fastapi import FastAPI, Request
 
-from app.api import diagnostics, files, health, monitoring, tasks
+from app.api import diagnostics, files, health, monitoring, monitoring_extra, tasks
 from app.db import init_db
 
 app = FastAPI(
@@ -15,16 +15,28 @@ app = FastAPI(
     version="0.1.0",
 )
 
+# 监控面板页面：需要加载 CDN 的 ECharts 与内联 JS，CSP 单独放行（其余 API 保持严格）
+_DASHBOARD_CSP = (
+    "default-src 'self'; "
+    "script-src 'unsafe-inline' https://cdn.jsdelivr.net; "
+    "style-src 'unsafe-inline' https://cdn.jsdelivr.net; "
+    "img-src 'self' data:; font-src https://cdn.jsdelivr.net; "
+    "connect-src 'self'"
+)
+
 
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
     """给所有响应加安全头（API 型项目最该加的几项）。"""
     response = await call_next(request)
+    if request.url.path == "/api/v1/monitoring/dashboard":
+        response.headers["Content-Security-Policy"] = _DASHBOARD_CSP
+    else:
+        response.headers["Content-Security-Policy"] = "default-src 'none'"  # 纯 JSON API 不加载任何资源
     response.headers["X-Content-Type-Options"] = "nosniff"      # 防 MIME 类型混淆
     response.headers["X-Frame-Options"] = "DENY"                # 防点击劫持（禁止 iframe 嵌入）
     response.headers["Referrer-Policy"] = "no-referrer"         # 防 URL 信息经 Referer 泄露
     response.headers["Cache-Control"] = "no-store"              # 敏感接口禁止缓存
-    response.headers["Content-Security-Policy"] = "default-src 'none'"  # 纯 JSON API 不加载任何资源
     if request.url.scheme == "https":
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     return response
@@ -35,6 +47,7 @@ app.include_router(diagnostics.router, prefix="/api/v1")
 app.include_router(tasks.router, prefix="/api/v1")
 app.include_router(files.router, prefix="/api/v1")
 app.include_router(monitoring.router, prefix="/api/v1")
+app.include_router(monitoring_extra.router, prefix="/api/v1")
 
 
 @app.on_event("startup")

@@ -21,6 +21,9 @@ _run_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "current_run_id", default=None
 )
 
+# 单文件超过该字节数自动滚动（cli.jsonl 这类共用文件可能无限增长）
+MAX_LOG_BYTES = 20 * 1024 * 1024  # 20MB
+
 
 def new_run_id() -> str:
     return uuid.uuid4().hex[:16]
@@ -45,7 +48,15 @@ def _append(category: str, run_id: str, obj: dict) -> None:
     base = Path(settings.LOG_DIR) / category
     base.mkdir(parents=True, exist_ok=True)
     line = {"ts": _ts(), "run_id": run_id, **obj}
-    with open(base / f"{run_id}.jsonl", "a", encoding="utf-8") as f:
+    path = base / f"{run_id}.jsonl"
+    # 日志轮转：超过阈值则把旧文件改名留档（加时间戳），新数据写入新文件
+    if path.exists() and path.stat().st_size > MAX_LOG_BYTES:
+        rotated = base / f"{run_id}.{datetime.now().strftime('%Y%m%d%H%M%S')}.jsonl"
+        try:
+            path.rename(rotated)
+        except OSError:
+            pass  # 滚动失败（如文件被占用）不阻塞写入
+    with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(line, ensure_ascii=False, default=str) + "\n")
 
 

@@ -47,6 +47,10 @@ class Settings(BaseSettings):
     API_KEYS: str = "dev-key-123"
     API_RATE_LIMIT_PER_MINUTE: int = 60
 
+    # ---- 监控面板：token 成本估算单价（元/百万 tokens，按官方定价自行更新）----
+    LLM_INPUT_PRICE_PER_M: float = 2.0
+    LLM_OUTPUT_PRICE_PER_M: float = 8.0
+
     # ---- 任务系统 ----
     WORKER_CONCURRENCY: int = 4
     TASK_MAX_RETRIES: int = 3

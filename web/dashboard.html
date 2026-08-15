@@ -1,0 +1,846 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>监控面板 · 电商异常诊断 Agent</title>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
+<style>
+  /* ============ 设计令牌（主色由 JS 主题切换；底色由亮/暗模式切换） ============ */
+  :root {
+    --c1: #6366f1; --c2: #a855f7; --c3: #ec4899; --c4: #22d3ee;
+    /* 暗色模式（默认） */
+    --bg: #0a0c14;
+    --bg-soft: #0f1220;
+    --card: rgba(255, 255, 255, 0.04);
+    --card-border: rgba(255, 255, 255, 0.09);
+    --text: #e8ebf4;
+    --text-dim: #929aae;
+    --text-faint: #5f6779;
+    --ok: #34d399;
+    --warn: #fbbf24;
+    --err: #f87171;
+    --radius: 16px;
+    --font: "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  }
+  :root[data-theme="light"] {
+    --bg: #f3f4f9;
+    --bg-soft: #ffffff;
+    --card: rgba(255, 255, 255, 0.8);
+    --card-border: rgba(15, 23, 42, 0.1);
+    --text: #0f172a;
+    --text-dim: #475569;
+    --text-faint: #94a3b8;
+    --ok: #059669;
+    --warn: #d97706;
+    --err: #dc2626;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { color-scheme: dark; }
+  :root[data-theme="light"] { color-scheme: light; }
+  body {
+    font-family: var(--font);
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    overflow-x: hidden;
+    transition: background .4s ease, color .4s ease;
+  }
+  /* 背景光晕：随主题色漂移 */
+  body::before {
+    content: "";
+    position: fixed; inset: 0; z-index: -1;
+    background:
+      radial-gradient(900px 500px at 15% -10%, color-mix(in srgb, var(--c1) 20%, transparent), transparent 70%),
+      radial-gradient(800px 500px at 85% 0%, color-mix(in srgb, var(--c2) 14%, transparent), transparent 70%),
+      radial-gradient(1000px 700px at 50% 110%, color-mix(in srgb, var(--c3) 9%, transparent), transparent 70%);
+    transition: background 0.8s ease;
+  }
+  :root[data-theme="light"] body::before {
+    background:
+      radial-gradient(900px 500px at 15% -10%, color-mix(in srgb, var(--c1) 12%, transparent), transparent 70%),
+      radial-gradient(800px 500px at 85% 0%, color-mix(in srgb, var(--c2) 10%, transparent), transparent 70%),
+      radial-gradient(1000px 700px at 50% 110%, color-mix(in srgb, var(--c3) 6%, transparent), transparent 70%);
+  }
+  body::after {
+    content: "";
+    position: fixed; inset: 0; z-index: -1;
+    background-image:
+      linear-gradient(rgba(255,255,255,0.02) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,0.02) 1px, transparent 1px);
+    background-size: 44px 44px;
+    mask-image: radial-gradient(ellipse 90% 60% at 50% 0%, #000 30%, transparent 75%);
+  }
+  :root[data-theme="light"] body::after {
+    background-image:
+      linear-gradient(rgba(15,23,42,0.03) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(15,23,42,0.03) 1px, transparent 1px);
+  }
+
+  /* ============ 顶栏 ============ */
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 16px; flex-wrap: wrap;
+    padding: 22px 30px 10px;
+  }
+  .brand { display: flex; align-items: center; gap: 14px; }
+  .logo {
+    width: 44px; height: 44px; border-radius: 12px;
+    background: linear-gradient(135deg, var(--c1), var(--c2), var(--c3));
+    display: grid; place-items: center;
+    font-size: 22px; box-shadow: 0 6px 24px color-mix(in srgb, var(--c2) 45%, transparent);
+    animation: float 4s ease-in-out infinite;
+  }
+  @keyframes float { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-5px); } }
+  .brand h1 { font-size: 19px; font-weight: 600; letter-spacing: 0.3px; }
+  .brand p { font-size: 13px; color: var(--text-dim); margin-top: 3px; }
+
+  .controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+
+  /* 通用控件 */
+  .seg { display: flex; background: var(--card); border: 1px solid var(--card-border); border-radius: 10px; padding: 3px; backdrop-filter: blur(8px); }
+  .seg button {
+    border: 0; background: transparent; color: var(--text-dim);
+    font: inherit; font-size: 13.5px; padding: 6px 13px; border-radius: 7px;
+    cursor: pointer; transition: all .18s ease; white-space: nowrap;
+  }
+  .seg button:hover { color: var(--text); }
+  .seg button.active { background: linear-gradient(135deg, var(--c1), var(--c2)); color: #fff; box-shadow: 0 2px 12px color-mix(in srgb, var(--c1) 50%, transparent); }
+
+  .themes { display: flex; gap: 6px; align-items: center; padding: 3px 8px; background: var(--card); border: 1px solid var(--card-border); border-radius: 10px; }
+  .themes .dot { width: 19px; height: 19px; border-radius: 50%; cursor: pointer; border: 2px solid transparent; transition: all .2s ease; }
+  .themes .dot:hover { transform: scale(1.18); }
+  .themes .dot.active { border-color: var(--text); box-shadow: 0 0 0 3px color-mix(in srgb, var(--c1) 35%, transparent); }
+
+  .icon-btn {
+    border: 1px solid var(--card-border); background: var(--card); color: var(--text);
+    border-radius: 10px; width: 38px; height: 38px; font-size: 17px; cursor: pointer;
+    backdrop-filter: blur(8px); transition: all .2s ease;
+  }
+  .icon-btn:hover { transform: translateY(-2px); border-color: color-mix(in srgb, var(--c1) 45%, transparent); box-shadow: 0 6px 18px rgba(0,0,0,.3); }
+
+  .key-input {
+    background: var(--card); border: 1px solid var(--card-border); border-radius: 10px;
+    color: var(--text); font: inherit; font-size: 13.5px; padding: 8px 13px; width: 200px;
+    outline: none; transition: border-color .2s;
+  }
+  .key-input:focus { border-color: var(--c1); }
+  .key-input::placeholder { color: var(--text-faint); }
+
+  .switch { display: flex; align-items: center; gap: 7px; font-size: 13.5px; color: var(--text-dim); cursor: pointer; user-select: none; }
+  .switch input { display: none; }
+  .track { width: 36px; height: 20px; border-radius: 20px; background: rgba(127,127,127,.35); position: relative; transition: background .25s; }
+  .track::after { content: ""; position: absolute; top: 3px; left: 3px; width: 14px; height: 14px; border-radius: 50%; background: #fff; transition: transform .25s; }
+  .switch input:checked + .track { background: linear-gradient(135deg, var(--c1), var(--c2)); }
+  .switch input:checked + .track::after { transform: translateX(16px); }
+
+  /* ============ 主内容 ============ */
+  main { padding: 12px 30px 40px; max-width: 1680px; margin: 0 auto; }
+
+  .banner { display: none; align-items: center; gap: 10px; padding: 11px 16px; border-radius: 12px; margin: 10px 0; font-size: 14px; border: 1px solid; backdrop-filter: blur(8px); animation: fadeUp .4s ease both; }
+  .banner.show { display: flex; }
+  .banner.err { background: color-mix(in srgb, var(--err) 14%, transparent); border-color: color-mix(in srgb, var(--err) 45%, transparent); color: var(--err); }
+
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; margin-top: 18px; }
+  .kpi {
+    position: relative; overflow: hidden;
+    background: var(--card); border: 1px solid var(--card-border); border-radius: var(--radius);
+    padding: 18px 20px; backdrop-filter: blur(10px);
+    transition: transform .25s ease, box-shadow .25s ease, border-color .25s;
+    animation: fadeUp .5s ease both;
+  }
+  .kpi::before { content: ""; position: absolute; top: 0; left: 0; right: 0; height: 2px; background: linear-gradient(90deg, var(--c1), var(--c2), transparent); opacity: 0; transition: opacity .25s; }
+  .kpi:hover { transform: translateY(-4px); border-color: color-mix(in srgb, var(--c1) 40%, transparent); box-shadow: 0 14px 40px rgba(0,0,0,0.35), 0 0 0 1px color-mix(in srgb, var(--c1) 12%, transparent); }
+  .kpi:hover::before { opacity: 1; }
+  .kpi .label { font-size: 13.5px; color: var(--text-dim); display: flex; align-items: center; gap: 6px; }
+  .kpi .icon { font-size: 15px; }
+  .kpi .value { font-size: 34px; font-weight: 700; margin-top: 8px; font-variant-numeric: tabular-nums; letter-spacing: -0.5px; }
+  .kpi .value small { font-size: 14px; font-weight: 500; color: var(--text-dim); margin-left: 4px; }
+  .kpi .sub { font-size: 12.5px; color: var(--text-faint); margin-top: 6px; }
+  .kpi:nth-child(2) { animation-delay: .06s; }
+  .kpi:nth-child(3) { animation-delay: .12s; }
+  .kpi:nth-child(4) { animation-delay: .18s; }
+  .kpi:nth-child(5) { animation-delay: .24s; }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(440px, 1fr)); gap: 14px; margin-top: 14px; }
+  .panel {
+    background: var(--card); border: 1px solid var(--card-border); border-radius: var(--radius);
+    backdrop-filter: blur(10px); overflow: hidden;
+    animation: fadeUp .55s ease both;
+    transition: border-color .25s, background .4s;
+  }
+  .panel:hover { border-color: color-mix(in srgb, var(--c1) 25%, transparent); }
+  .panel .head { display: flex; align-items: center; justify-content: space-between; padding: 14px 18px 0; }
+  .panel .title { font-size: 15px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+  .panel .title .bar { width: 3px; height: 15px; border-radius: 3px; background: linear-gradient(180deg, var(--c1), var(--c3)); }
+  .panel .legend { font-size: 12px; color: var(--text-faint); }
+  .chart { height: 250px; padding: 6px 6px 10px; }
+  .chart.sm { height: 220px; }
+
+  /* ============ 异常列表 ============ */
+  .anomalies-panel { margin-top: 14px; }
+  .anom-tools { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .btn-more {
+    border: 1px dashed color-mix(in srgb, var(--c1) 50%, transparent);
+    background: transparent; color: var(--text-dim); font: inherit; font-size: 13px;
+    padding: 8px 22px; border-radius: 10px; cursor: pointer; transition: all .2s;
+  }
+  .btn-more:hover { color: var(--text); border-color: var(--c1); background: color-mix(in srgb, var(--c1) 8%, transparent); }
+  .loadmore { display: flex; align-items: center; justify-content: center; gap: 12px; padding: 12px 0 16px; }
+  .loadmore .info { font-size: 12.5px; color: var(--text-faint); }
+  .badge { display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 20px; font-size: 12px; font-weight: 600; white-space: nowrap; }
+  .badge.sev-high { background: color-mix(in srgb, var(--err) 16%, transparent); color: var(--err); border: 1px solid color-mix(in srgb, var(--err) 40%, transparent); }
+  .badge.sev-med  { background: color-mix(in srgb, var(--warn) 16%, transparent); color: var(--warn); border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent); }
+  .badge.sev-low  { background: color-mix(in srgb, var(--c4) 16%, transparent); color: var(--c4); border: 1px solid color-mix(in srgb, var(--c4) 40%, transparent); }
+  .badge.st-open  { background: color-mix(in srgb, var(--ok) 14%, transparent); color: var(--ok); border: 1px solid color-mix(in srgb, var(--ok) 35%, transparent); }
+  .badge.st-closed { background: color-mix(in srgb, var(--text-faint) 14%, transparent); color: var(--text-faint); border: 1px solid color-mix(in srgb, var(--text-faint) 35%, transparent); }
+  .btn-report {
+    border: 1px solid color-mix(in srgb, var(--c1) 45%, transparent);
+    background: linear-gradient(135deg, color-mix(in srgb, var(--c1) 85%, transparent), color-mix(in srgb, var(--c2) 85%, transparent));
+    color: #fff; font: inherit; font-size: 12.5px; font-weight: 600;
+    padding: 6px 14px; border-radius: 8px; cursor: pointer; white-space: nowrap;
+    transition: all .2s ease;
+  }
+  .btn-report:hover { transform: translateY(-2px); box-shadow: 0 6px 16px color-mix(in srgb, var(--c1) 45%, transparent); }
+  .btn-report:disabled { opacity: .45; cursor: not-allowed; transform: none; box-shadow: none; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  thead th { text-align: left; font-weight: 500; color: var(--text-faint); font-size: 12.5px; padding: 13px 16px 9px; letter-spacing: 0.4px; white-space: nowrap; }
+  tbody td { padding: 10px 16px; border-top: 1px solid var(--card-border); vertical-align: middle; white-space: nowrap; }
+  tbody tr { transition: background .15s; }
+  tbody tr:hover { background: color-mix(in srgb, var(--c1) 6%, transparent); }
+  .dur { display: flex; align-items: center; gap: 8px; min-width: 120px; }
+  .dur .track2 { flex: 1; height: 4px; border-radius: 4px; background: rgba(127,127,127,.2); overflow: hidden; }
+  .dur .fill { height: 100%; border-radius: 4px; background: linear-gradient(90deg, var(--warn), var(--err)); }
+  .dur b { font-variant-numeric: tabular-nums; font-size: 13px; white-space: nowrap; }
+  .stmt { font-family: Consolas, "Courier New", monospace; font-size: 12.5px; color: var(--text-dim); max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .rid { font-family: Consolas, monospace; font-size: 12px; color: var(--c4); white-space: nowrap; }
+  .mono { font-family: Consolas, monospace; font-size: 12px; color: var(--text-faint); }
+  .empty { padding: 30px; text-align: center; color: var(--text-faint); font-size: 13.5px; }
+
+  .bottom { display: grid; grid-template-columns: 2fr 1fr; gap: 14px; margin-top: 14px; }
+  @media (max-width: 1100px) { .bottom { grid-template-columns: 1fr; } }
+
+  /* 反馈卡 */
+  .fb-top { display: flex; align-items: baseline; gap: 12px; padding: 16px 18px 4px; }
+  .fb-score { font-size: 40px; font-weight: 800; font-variant-numeric: tabular-nums; background: linear-gradient(135deg, var(--c1), var(--c3)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .fb-stars { color: var(--warn); font-size: 17px; letter-spacing: 2px; }
+  .fb-meta { font-size: 13px; color: var(--text-dim); margin: 2px 18px 8px; }
+  .fb-histo { display: flex; flex-direction: column; gap: 6px; padding: 6px 18px 8px; }
+  .fb-row { display: grid; grid-template-columns: 26px 1fr 28px; align-items: center; gap: 8px; font-size: 12.5px; color: var(--text-dim); }
+  .fb-row .bar { height: 9px; border-radius: 6px; background: rgba(127,127,127,.18); overflow: hidden; }
+  .fb-row .fill { height: 100%; border-radius: 6px; background: linear-gradient(90deg, var(--c1), var(--c3)); width: 0; transition: width .8s cubic-bezier(.22,1,.36,1); }
+  .fb-chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 4px 18px 16px; }
+  .chip { font-size: 12px; padding: 4px 11px; border-radius: 20px; background: color-mix(in srgb, var(--c1) 14%, transparent); border: 1px solid color-mix(in srgb, var(--c1) 30%, transparent); color: var(--text-dim); }
+
+  .footer { text-align: center; color: var(--text-faint); font-size: 12.5px; margin-top: 22px; }
+  .footer .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--ok); margin-right: 5px; animation: pulse 2s infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+
+  /* ============ 报告弹窗 ============ */
+  .modal-mask {
+    position: fixed; inset: 0; z-index: 100;
+    background: rgba(0,0,0,.55); backdrop-filter: blur(4px);
+    display: none; align-items: center; justify-content: center; padding: 20px;
+  }
+  .modal-mask.show { display: flex; animation: fadeIn .25s ease; }
+  @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+  .modal {
+    background: var(--bg-soft); border: 1px solid var(--card-border); border-radius: 18px;
+    width: 100%; max-width: 780px; max-height: 86vh; overflow-y: auto;
+    box-shadow: 0 30px 80px rgba(0,0,0,.5);
+    animation: popIn .32s cubic-bezier(.22,1,.36,1);
+  }
+  @keyframes popIn { from { opacity: 0; transform: translateY(24px) scale(.97); } to { opacity: 1; transform: none; } }
+  .modal-head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 18px 22px 14px; border-bottom: 1px solid var(--card-border);
+    position: sticky; top: 0; background: var(--bg-soft); z-index: 1;
+  }
+  .modal-head h2 { font-size: 17px; font-weight: 700; display: flex; align-items: center; gap: 10px; }
+  .modal-close { border: 1px solid var(--card-border); background: transparent; color: var(--text-dim); width: 32px; height: 32px; border-radius: 9px; font-size: 16px; cursor: pointer; transition: all .2s; }
+  .modal-close:hover { color: var(--err); border-color: var(--err); transform: rotate(90deg); }
+  .modal-body { padding: 16px 22px 24px; }
+  .rep-meta { display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 12.5px; color: var(--text-faint); padding-bottom: 14px; border-bottom: 1px dashed var(--card-border); margin-bottom: 14px; }
+  .rep-meta b { color: var(--text-dim); font-weight: 500; }
+  .fact {
+    background: var(--card); border: 1px solid var(--card-border); border-left: 3px solid var(--c1);
+    border-radius: 10px; padding: 11px 14px; margin-bottom: 9px;
+  }
+  .fact .point { font-size: 14px; font-weight: 600; color: var(--text); }
+  .fact .evidence { font-size: 13px; color: var(--text-dim); margin-top: 4px; line-height: 1.55; }
+  .rep-sec { margin: 16px 0 8px; font-size: 13px; font-weight: 700; color: var(--c2); display: flex; align-items: center; gap: 7px; }
+  .rep-sec::before { content: ""; width: 8px; height: 8px; border-radius: 2px; background: linear-gradient(135deg, var(--c1), var(--c3)); transform: rotate(45deg); }
+  .rep-text { font-size: 14px; line-height: 1.65; color: var(--text-dim); }
+  .sugg { display: flex; gap: 9px; align-items: flex-start; font-size: 13.5px; color: var(--text); padding: 6px 0; }
+  .sugg .n { flex: none; width: 20px; height: 20px; border-radius: 50%; background: linear-gradient(135deg, var(--c1), var(--c2)); color: #fff; font-size: 11.5px; font-weight: 700; display: grid; place-items: center; margin-top: 1px; }
+  .rep-null { text-align: center; padding: 30px 10px; color: var(--text-faint); }
+  .rep-null .big { font-size: 30px; margin-bottom: 8px; }
+
+  @keyframes fadeUp { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: translateY(0); } }
+
+  @media (max-width: 700px) {
+    header { padding: 16px 16px 6px; }
+    main { padding: 10px 16px 30px; }
+    .key-input { width: 150px; }
+    .grid { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand">
+    <div class="logo">🐟</div>
+    <div>
+      <h1>监控面板 · 电商异常诊断 Agent</h1>
+      <p id="last-update">等待加载…</p>
+    </div>
+  </div>
+  <div class="controls">
+    <div class="seg" id="window-seg">
+      <button data-hours="6">6h</button>
+      <button data-hours="24" class="active">24h</button>
+      <button data-hours="72">3d</button>
+      <button data-hours="168">7d</button>
+    </div>
+    <div class="themes" id="theme-picker" title="主题配色"></div>
+    <button class="icon-btn" id="mode-toggle" title="切换黑白底色">🌙</button>
+    <input class="key-input" id="api-key" type="password" placeholder="X-API-Key" autocomplete="off">
+    <label class="switch"><input type="checkbox" id="auto-refresh" checked><span class="track"></span><span>自动刷新</span></label>
+  </div>
+</header>
+
+<main>
+  <div class="banner err" id="banner">⚠️ 加载失败：请确认 API Key 正确且服务已启动</div>
+
+  <section class="kpis">
+    <div class="kpi"><div class="label"><span class="icon">🧪</span>Agent 诊断次数</div><div class="value" id="kpi-runs">–</div><div class="sub" id="kpi-runs-sub"></div></div>
+    <div class="kpi"><div class="label"><span class="icon">🚨</span>诊断错误率</div><div class="value" id="kpi-err">–</div><div class="sub" id="kpi-err-sub"></div></div>
+    <div class="kpi"><div class="label"><span class="icon">⚡</span>LLM 平均延迟</div><div class="value" id="kpi-llm">–</div><div class="sub" id="kpi-llm-sub"></div></div>
+    <div class="kpi"><div class="label"><span class="icon">💰</span>Token 成本</div><div class="value" id="kpi-cost">–</div><div class="sub" id="kpi-cost-sub"></div></div>
+    <div class="kpi"><div class="label"><span class="icon">📥</span>任务积压</div><div class="value" id="kpi-backlog">–</div><div class="sub" id="kpi-backlog-sub"></div></div>
+  </section>
+
+  <section class="panel anomalies-panel">
+    <div class="head">
+      <div class="title"><span class="bar"></span>异常事件 · 点击「查看报告」跳转诊断</div>
+      <div class="anom-tools">
+        <div class="seg" id="anom-scope">
+          <button data-scope="all" class="active">全部</button>
+          <button data-scope="item">商品级</button>
+          <button data-scope="category">类目级</button>
+        </div>
+        <label class="switch"><input type="checkbox" id="anom-diag"><span class="track"></span><span>仅已诊断</span></label>
+        <div class="legend" id="anom-count"></div>
+      </div>
+    </div>
+    <div style="overflow-x:auto; padding-top: 6px;">
+      <table>
+        <thead><tr>
+          <th>严重度</th><th>商品 / 类目</th><th>指标</th><th>规则</th><th>降幅</th><th>异常窗口</th><th>状态</th><th>检出时间</th><th style="text-align:right">诊断</th>
+        </tr></thead>
+        <tbody id="anomaly-body"><tr><td colspan="9"><div class="empty">加载中…</div></td></tr></tbody>
+      </table>
+    </div>
+    <div class="loadmore" id="anom-more" style="display:none">
+      <button class="btn-more" id="anom-more-btn">加载更多</button>
+      <span class="info" id="anom-more-info"></span>
+    </div>
+  </section>
+
+  <section class="grid">
+    <div class="panel"><div class="head"><div class="title"><span class="bar"></span>Agent 诊断量 · 错误率</div><div class="legend">柱=次数 · 线=错误率%</div></div><div class="chart" id="chart-runs"></div></div>
+    <div class="panel"><div class="head"><div class="title"><span class="bar"></span>工具调用 · 错误率</div><div class="legend">柱=次数 · 线=错误率%</div></div><div class="chart" id="chart-tools"></div></div>
+    <div class="panel"><div class="head"><div class="title"><span class="bar"></span>LLM 延迟 · Token 用量</div><div class="legend">线=延迟ms · 堆叠=token</div></div><div class="chart" id="chart-llm"></div></div>
+    <div class="panel"><div class="head"><div class="title"><span class="bar"></span>任务状态分布</div><div class="legend">堆叠面积</div></div><div class="chart" id="chart-tasks"></div></div>
+  </section>
+
+  <section class="bottom">
+    <div class="panel">
+      <div class="head"><div class="title"><span class="bar"></span>慢查询 TopN（≥300ms）</div><div class="legend" id="slow-count"></div></div>
+      <div style="overflow-x:auto; padding-top: 6px;">
+        <table>
+          <thead><tr><th style="width:140px">耗时</th><th>SQL 语句</th><th style="width:115px">run_id</th><th style="width:95px">时间</th></tr></thead>
+          <tbody id="slow-body"><tr><td colspan="4"><div class="empty">暂无慢查询</div></td></tr></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="head"><div class="title"><span class="bar"></span>用户反馈</div></div>
+      <div id="feedback-box">
+        <div class="fb-top"><span class="fb-score">–</span><span class="fb-stars"></span></div>
+        <div class="fb-meta" id="fb-meta">暂无反馈</div>
+        <div class="fb-histo" id="fb-histo"></div>
+        <div class="fb-chips" id="fb-chips"></div>
+      </div>
+    </div>
+  </section>
+
+  <div class="footer"><span class="dot"></span><span id="footer-status">等待加载</span> · <span id="alert-status"></span></div>
+</main>
+
+<!-- 诊断报告弹窗 -->
+<div class="modal-mask" id="report-mask">
+  <div class="modal">
+    <div class="modal-head">
+      <h2>📋 <span id="rep-title">诊断报告</span></h2>
+      <button class="modal-close" id="rep-close">✕</button>
+    </div>
+    <div class="modal-body" id="rep-body"></div>
+  </div>
+</div>
+
+<script>
+/* ================= 状态与主题 ================= */
+const THEMES = {
+  aurora: ['#6366f1', '#a855f7', '#ec4899', '#22d3ee'],
+  deepsea: ['#06b6d4', '#3b82f6', '#818cf8', '#22d3ee'],
+  lava:   ['#f59e0b', '#ef4444', '#fb7185', '#fbbf24'],
+  mint:   ['#10b981', '#14b8a6', '#a3e635', '#34d399'],
+};
+const METRIC_LABEL = {
+  uv: 'UV', view_count: '曝光', per_user_views: '人均浏览', click_rate: '点击率',
+  addcart_rate: '加购率', cvr: '转化率', cart_to_pay: '加购转支付', gmv: 'GMV', avg_price: '客单价',
+};
+const state = {
+  hours: 24,
+  bucket: 60,
+  key: localStorage.getItem('monitor.key') || '',
+  auto: true,
+  theme: localStorage.getItem('monitor.theme') || 'aurora',
+  light: localStorage.getItem('monitor.light') === '1',
+};
+
+function applyTheme(name) {
+  const colors = THEMES[name] || THEMES.aurora;
+  const root = document.documentElement.style;
+  root.setProperty('--c1', colors[0]);
+  root.setProperty('--c2', colors[1]);
+  root.setProperty('--c3', colors[2]);
+  root.setProperty('--c4', colors[3]);
+  document.querySelectorAll('#theme-picker .dot').forEach(d => d.classList.toggle('active', d.dataset.theme === name));
+  redrawCharts();
+}
+
+function applyMode() {
+  document.documentElement.dataset.theme = state.light ? 'light' : 'dark';
+  document.getElementById('mode-toggle').textContent = state.light ? '☀️' : '🌙';
+  document.getElementById('mode-toggle').title = state.light ? '切换到暗色' : '切换到亮色';
+  redrawCharts();
+}
+
+/* ECharts 中性色：随亮/暗模式 */
+function neut() {
+  return state.light
+    ? { label: '#64748b', split: 'rgba(15,23,42,0.08)', axis: 'rgba(15,23,42,0.15)', err: '#dc2626', warn: '#d97706', tooltipBg: '#fff', tooltipText: '#111' }
+    : { label: '#5f6779', split: 'rgba(255,255,255,0.05)', axis: 'rgba(255,255,255,0.1)', err: '#f87171', warn: '#fbbf24', tooltipBg: '#111827', tooltipText: '#e8ebf4' };
+}
+
+function buildThemePicker() {
+  const box = document.getElementById('theme-picker');
+  Object.keys(THEMES).forEach(name => {
+    const [a, b] = THEMES[name];
+    const dot = document.createElement('span');
+    dot.className = 'dot' + (name === state.theme ? ' active' : '');
+    dot.dataset.theme = name;
+    dot.style.background = `linear-gradient(135deg, ${a}, ${b})`;
+    dot.title = { aurora: '极光', deepsea: '深海', lava: '熔岩', mint: '薄荷' }[name];
+    dot.onclick = () => { state.theme = name; localStorage.setItem('monitor.theme', name); applyTheme(name); };
+    box.appendChild(dot);
+  });
+}
+
+/* ================= API 封装 ================= */
+async function api(path, params = {}) {
+  const qs = new URLSearchParams(Object.entries(params)).toString();
+  const res = await fetch(`/api/v1${path}?${qs}`, {
+    headers: state.key ? { 'X-API-Key': state.key } : {},
+  });
+  if (res.status === 401 || res.status === 403) throw new Error('AUTH');
+  if (!res.ok) throw new Error('HTTP ' + res.status);
+  return res.json();
+}
+
+/* ================= 渲染 ================= */
+const charts = {};
+
+function chart(id) {
+  if (!charts[id]) charts[id] = echarts.init(document.getElementById(id));
+  return charts[id];
+}
+function redrawCharts() { Object.values(charts).forEach(c => c.resize()); }
+window.addEventListener('resize', redrawCharts);
+
+function fmtTime(iso) {
+  const d = new Date(iso);
+  return `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:00`;
+}
+function sum(arr, f) { return arr.reduce((a, b) => a + f(b), 0); }
+function avgNonEmpty(arr, f) {
+  const vals = arr.map(f).filter(v => v !== null && v !== undefined);
+  return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+}
+
+function countUp(el, target, decimals = 0) {
+  const start = parseFloat(el.dataset.v || '0');
+  const dur = 700; const t0 = performance.now();
+  function tick(t) {
+    const p = Math.min((t - t0) / dur, 1);
+    const ease = 1 - Math.pow(1 - p, 3);
+    const v = start + (target - start) * ease;
+    el.textContent = v.toLocaleString('zh-CN', { maximumFractionDigits: decimals, minimumFractionDigits: decimals });
+    if (p < 1) requestAnimationFrame(tick);
+    else el.dataset.v = String(target);
+  }
+  requestAnimationFrame(tick);
+}
+
+function render(hist, slow, fb, cost) {
+  const buckets = hist.buckets || [];
+  const n = neut();
+  /* 空数据提示（ECharts graphic 文本） */
+  const emptyHint = (hasData, hint) => hasData ? [] : [{
+    type: 'text', left: 'center', top: 'middle',
+    style: { text: hint, fill: n.label, fontSize: 13.5, fontWeight: 400 },
+  }];
+  const hasRuns = sum(buckets, b => b.agent_runs.total) > 0;
+  const hasTools = sum(buckets, b => b.tool_calls.total) > 0;
+  const hasTasks = sum(buckets, b => Object.keys(b.tasks).length) > 0;
+  /* ---- KPI ---- */
+  const total = sum(buckets, b => b.agent_runs.total);
+  const errs = sum(buckets, b => b.agent_runs.error);
+  const errRate = total ? errs / total * 100 : 0;
+  const llmAvg = avgNonEmpty(buckets, b => b.agent_runs.avg_llm_latency_ms);
+  const lastBucket = buckets[buckets.length - 1];
+  const backlog = lastBucket ? (lastBucket.tasks.pending || 0) + (lastBucket.tasks.retrying || 0) : 0;
+
+  countUp(document.getElementById('kpi-runs'), total);
+  document.getElementById('kpi-runs-sub').textContent = `窗口内共 ${total} 次诊断`;
+  countUp(document.getElementById('kpi-err'), errRate, 1);
+  const errEl = document.getElementById('kpi-err');
+  errEl.innerHTML = errEl.textContent + '<small>%</small>';
+  document.getElementById('kpi-err-sub').textContent = `${errs} 次失败 / ${total} 次`;
+  if (llmAvg !== null) {
+    countUp(document.getElementById('kpi-llm'), llmAvg);
+    document.getElementById('kpi-llm').innerHTML += '<small>ms</small>';
+  } else document.getElementById('kpi-llm').textContent = '–';
+  document.getElementById('kpi-llm-sub').textContent = '每次 LLM 调用';
+  countUp(document.getElementById('kpi-cost'), cost.cost_cny || 0, 2);
+  document.getElementById('kpi-cost').innerHTML += '<small>元</small>';
+  document.getElementById('kpi-cost-sub').textContent = `in ${(cost.tokens_in/1e6).toFixed(2)}M · out ${(cost.tokens_out/1e6).toFixed(2)}M`;
+  countUp(document.getElementById('kpi-backlog'), backlog);
+  document.getElementById('kpi-backlog-sub').textContent = 'pending + retrying';
+
+  /* ---- 通用 x 轴 ---- */
+  const xs = buckets.map(b => fmtTime(b.bucket_start));
+
+  /* 1. Agent 运行量 + 错误率 */
+  chart('chart-runs').setOption({
+    tooltip: { trigger: 'axis', backgroundColor: n.tooltipBg, textStyle: { color: n.tooltipText }, borderColor: 'rgba(0,0,0,0.1)' },
+    grid: { left: 48, right: 48, top: 32, bottom: 28 },
+    xAxis: { type: 'category', data: xs, axisLabel: { color: n.label, fontSize: 11 }, axisLine: { lineStyle: { color: n.axis } } },
+    yAxis: [
+      { type: 'value', splitLine: { lineStyle: { color: n.split } }, axisLabel: { color: n.label } },
+      { type: 'value', max: v => Math.max(100, v.max * 1.4), axisLabel: { color: n.label, formatter: '{value}%' }, splitLine: { show: false } },
+    ],
+    series: [
+      { name: '诊断次数', type: 'bar', data: buckets.map(b => b.agent_runs.total), itemStyle: { borderRadius: [5, 5, 0, 0], color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1, colorStops: [{ offset: 0, color: THEMES[state.theme][0] }, { offset: 1, color: 'rgba(99,102,241,0.12)' }] } }, barMaxWidth: 26 },
+      { name: '错误率', type: 'line', yAxisIndex: 1, smooth: true, data: buckets.map(b => +(b.agent_runs.error_rate * 100).toFixed(2)), itemStyle: { color: n.err }, lineStyle: { width: 2.5 }, symbolSize: 6, areaStyle: { color: 'rgba(248,113,113,0.08)' } },
+    ],
+    graphic: emptyHint(hasRuns, '暂无诊断数据：先跑一次异常检测 / 提交诊断'),
+    animationDuration: 600,
+  });
+
+  /* 2. 工具调用 + 错误率 */
+  chart('chart-tools').setOption({
+    tooltip: { trigger: 'axis', backgroundColor: n.tooltipBg, textStyle: { color: n.tooltipText }, borderColor: 'rgba(0,0,0,0.1)' },
+    grid: { left: 48, right: 48, top: 32, bottom: 28 },
+    xAxis: { type: 'category', data: xs, axisLabel: { color: n.label, fontSize: 11 }, axisLine: { lineStyle: { color: n.axis } } },
+    yAxis: [
+      { type: 'value', splitLine: { lineStyle: { color: n.split } }, axisLabel: { color: n.label } },
+      { type: 'value', max: v => Math.max(100, v.max * 1.4), axisLabel: { color: n.label, formatter: '{value}%' }, splitLine: { show: false } },
+    ],
+    series: [
+      { name: '调用次数', type: 'bar', data: buckets.map(b => b.tool_calls.total), itemStyle: { borderRadius: [5, 5, 0, 0], color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1, colorStops: [{ offset: 0, color: THEMES[state.theme][1] }, { offset: 1, color: 'rgba(168,85,247,0.12)' }] } }, barMaxWidth: 26 },
+      { name: '错误率', type: 'line', yAxisIndex: 1, smooth: true, data: buckets.map(b => +(b.tool_calls.error_rate * 100).toFixed(2)), itemStyle: { color: n.warn }, lineStyle: { width: 2.5 }, symbolSize: 6 },
+    ],
+    graphic: emptyHint(hasTools, '暂无工具调用数据'),
+    animationDuration: 600,
+  });
+
+  /* 3. LLM 延迟 + token */
+  chart('chart-llm').setOption({
+    tooltip: { trigger: 'axis', backgroundColor: n.tooltipBg, textStyle: { color: n.tooltipText }, borderColor: 'rgba(0,0,0,0.1)' },
+    grid: { left: 48, right: 48, top: 32, bottom: 28 },
+    xAxis: { type: 'category', data: xs, axisLabel: { color: n.label, fontSize: 11 }, axisLine: { lineStyle: { color: n.axis } } },
+    yAxis: [
+      { type: 'value', name: 'ms', nameTextStyle: { color: n.label }, splitLine: { lineStyle: { color: n.split } }, axisLabel: { color: n.label } },
+      { type: 'value', name: 'token', nameTextStyle: { color: n.label }, axisLabel: { color: n.label }, splitLine: { show: false } },
+    ],
+    series: [
+      { name: 'LLM 延迟', type: 'line', smooth: true, data: buckets.map(b => b.agent_runs.avg_llm_latency_ms), itemStyle: { color: THEMES[state.theme][3] }, lineStyle: { width: 2.5 }, symbolSize: 5, connectNulls: true, areaStyle: { color: 'rgba(34,211,238,0.07)' } },
+      { name: '输入 token', type: 'bar', yAxisIndex: 1, stack: 't', barMaxWidth: 20, data: buckets.map(b => b.agent_runs.tokens_in), itemStyle: { color: 'rgba(99,102,241,0.55)' } },
+      { name: '输出 token', type: 'bar', yAxisIndex: 1, stack: 't', barMaxWidth: 20, data: buckets.map(b => b.agent_runs.tokens_out), itemStyle: { color: 'rgba(236,72,153,0.55)' } },
+    ],
+    graphic: emptyHint(hasRuns, '暂无数据'),
+    animationDuration: 600,
+  });
+
+  /* 4. 任务状态 */
+  const statuses = ['pending', 'running', 'retrying', 'succeeded', 'failed'];
+  const palette = { pending: n.warn, running: THEMES[state.theme][0], retrying: n.warn, succeeded: '#34d399', failed: n.err };
+  chart('chart-tasks').setOption({
+    tooltip: { trigger: 'axis', backgroundColor: n.tooltipBg, textStyle: { color: n.tooltipText }, borderColor: 'rgba(0,0,0,0.1)' },
+    legend: { bottom: 0, textStyle: { color: n.label, fontSize: 11.5 }, itemWidth: 13, itemHeight: 9 },
+    grid: { left: 44, right: 16, top: 32, bottom: 36 },
+    xAxis: { type: 'category', data: xs, axisLabel: { color: n.label, fontSize: 11 }, axisLine: { lineStyle: { color: n.axis } } },
+    yAxis: { type: 'value', splitLine: { lineStyle: { color: n.split } }, axisLabel: { color: n.label } },
+    series: statuses.map(st => ({
+      name: st, type: 'line', stack: 't', smooth: true, symbol: 'none',
+      lineStyle: { width: 1, opacity: 0.4 }, itemStyle: { color: palette[st] },
+      areaStyle: { opacity: 0.55 }, data: buckets.map(b => b.tasks[st] || 0),
+    })),
+    graphic: emptyHint(hasTasks, '暂无任务数据：提交诊断任务并运行 Worker 后展示'),
+    animationDuration: 700,
+  });
+
+  /* ---- 慢查询表 ---- */
+  const qs = slow.queries || [];
+  document.getElementById('slow-count').textContent = qs.length ? `${qs.length} 条` : '';
+  const body = document.getElementById('slow-body');
+  if (!qs.length) {
+    body.innerHTML = '<tr><td colspan="4"><div class="empty">暂无慢查询 ✨</div></td></tr>';
+  } else {
+    const maxDur = Math.max(...qs.map(q => q.duration_ms));
+    body.innerHTML = qs.map(q => `
+      <tr>
+        <td><div class="dur"><b>${q.duration_ms.toFixed(1)}ms</b><div class="track2"><div class="fill" style="width:${(q.duration_ms / maxDur * 100).toFixed(0)}%"></div></div></div></td>
+        <td><div class="stmt" title="${q.statement.replace(/"/g, '&quot;')}">${q.statement}</div></td>
+        <td><span class="rid">${q.run_id}</span></td>
+        <td><span class="mono">${q.ts.slice(5, 16)}</span></td>
+      </tr>`).join('');
+  }
+
+  /* ---- 反馈 ---- */
+  const fbScore = fb.avg_rating;
+  document.querySelector('.fb-score').textContent = fbScore !== null ? fbScore.toFixed(1) : '–';
+  document.querySelector('.fb-stars').textContent = fbScore !== null ? '★'.repeat(Math.round(fbScore)) + '☆'.repeat(5 - Math.round(fbScore)) : '';
+  document.getElementById('fb-meta').textContent = fb.total ? `共 ${fb.total} 条反馈` : '暂无反馈';
+  const histo = document.getElementById('fb-histo');
+  if (fb.total) {
+    const maxN = Math.max(...Object.values(fb.rating_histogram));
+    histo.innerHTML = [5, 4, 3, 2, 1].map(r => `
+      <div class="fb-row"><span>${r}★</span><div class="bar"><div class="fill" style="width:${(fb.rating_histogram[r] || 0) / maxN * 100}%"></div></div><span>${fb.rating_histogram[r] || 0}</span></div>`).join('');
+  } else histo.innerHTML = '';
+  const chips = document.getElementById('fb-chips');
+  chips.innerHTML = Object.entries(fb.by_category || {}).map(([k, v]) => `<span class="chip">${k} · ${v}</span>`).join('');
+}
+
+/* ================= 异常列表 ================= */
+function sevBadge(s) {
+  const cls = { high: 'sev-high', medium: 'sev-med', low: 'sev-low' }[s] || 'sev-med';
+  const label = { high: '严重', medium: '中等', low: '较低' }[s] || s;
+  return `<span class="badge ${cls}">${label}</span>`;
+}
+function statusBadge(s) {
+  const cls = s === 'open' ? 'st-open' : 'st-closed';
+  return `<span class="badge ${cls}">${s === 'open' ? '待处理' : '已关闭'}</span>`;
+}
+
+/* ================= 报告弹窗 ================= */
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+async function openReport(anomalyId, target) {
+  const mask = document.getElementById('report-mask');
+  document.getElementById('rep-title').textContent = `异常 #${anomalyId} · ${target} 诊断报告`;
+  document.getElementById('rep-body').innerHTML = '<div class="rep-null"><div class="big">🔄</div>加载报告中…</div>';
+  mask.classList.add('show');
+  try {
+    const rep = await api(`/monitoring/reports/${anomalyId}`);
+    renderReport(rep);
+  } catch (e) {
+    document.getElementById('rep-body').innerHTML =
+      `<div class="rep-null"><div class="big">🔍</div>该异常尚未生成诊断报告<br><br>
+        <span class="mono">可能原因：类目级异常暂不自动诊断，或 Worker 未运行/任务失败</span></div>`;
+  }
+}
+
+function renderReport(rep) {
+  const r = rep.report || {};
+  const facts = Array.isArray(r.facts) ? r.facts : [];
+  const analysis = r.analysis || {};
+  const suggestions = Array.isArray(r.suggestions) ? r.suggestions : [];
+  const body = document.getElementById('rep-body');
+  body.innerHTML = `
+    <div class="rep-meta">
+      <span>商品 <b>#${rep.item_id}</b></span>
+      <span>run_id <b class="rid">${rep.run_id}</b></span>
+      <span>模型 <b>${rep.model}</b></span>
+      <span>诊断时间 <b>${rep.created_at}</b></span>
+    </div>
+    ${facts.length ? `<div class="rep-sec">调查事实（工具取证）</div>` +
+      facts.map(f => `<div class="fact"><div class="point">${esc(f.point)}</div><div class="evidence">${esc(f.evidence)}</div></div>`).join('') : ''}
+    ${analysis.key_finding ? `<div class="rep-sec">关键发现</div><div class="rep-text">${esc(analysis.key_finding)}</div>` : ''}
+    ${analysis.impact ? `<div class="rep-sec">影响评估</div><div class="rep-text">${esc(analysis.impact)}</div>` : ''}
+    ${r.conclusion ? `<div class="rep-sec">结论</div><div class="rep-text"><b>${esc(r.conclusion)}</b></div>` : ''}
+    ${suggestions.length ? `<div class="rep-sec">建议措施</div>` +
+      suggestions.map((s, i) => `<div class="sugg"><span class="n">${i + 1}</span><span>${esc(s)}</span></div>`).join('') : ''}
+  `;
+}
+
+document.getElementById('rep-close').onclick = () => document.getElementById('report-mask').classList.remove('show');
+document.getElementById('report-mask').addEventListener('click', e => {
+  if (e.target === e.currentTarget) e.currentTarget.classList.remove('show');
+});
+document.addEventListener('keydown', e => { if (e.key === 'Escape') document.getElementById('report-mask').classList.remove('show'); });
+
+/* ================= 主流程 ================= */
+async function loadAll() {
+  const banner = document.getElementById('banner');
+  try {
+    const [hist, slow, fb, cost, alerts] = await Promise.all([
+      api('/monitoring/history', { hours: state.hours, bucket: state.bucket }),
+      api('/monitoring/slow-queries', { hours: state.hours, min_ms: 300, limit: 20 }),
+      api('/monitoring/feedback'),
+      api('/monitoring/cost', { hours: state.hours }),
+      api('/monitoring/alerts'),
+    ]);
+    render(hist, slow, fb, cost);
+    renderAlerts(alerts);
+    banner.classList.remove('show');
+    document.getElementById('last-update').textContent = `最后更新 ${new Date().toLocaleTimeString('zh-CN')} · ${state.hours}h 窗口 · ${state.bucket}min 粒度`;
+    document.getElementById('footer-status').textContent = '监控运行中 · 服务健康';
+  } catch (e) {
+    banner.classList.add('show');
+    document.getElementById('footer-status').textContent = e.message === 'AUTH' ? 'API Key 无效或缺失' : '连接失败：' + e.message;
+  }
+}
+
+/* ===== 异常列表（独立加载：筛选/分页手动触发，30s 自动刷新不打断浏览） ===== */
+const anomState = { scope: 'all', diagnosedOnly: false, offset: 0, limit: 50 };
+
+async function loadAnomalies(append = false) {
+  const body = document.getElementById('anomaly-body');
+  if (!append) body.innerHTML = '<tr><td colspan="9"><div class="empty">加载中…</div></td></tr>';
+  try {
+    const data = await api('/monitoring/anomalies', {
+      status: 'open',
+      scope: anomState.scope,
+      diagnosed_only: anomState.diagnosedOnly,
+      limit: anomState.limit,
+      offset: anomState.offset,
+    });
+    renderAnomalies(data, append);
+  } catch (e) {
+    if (!append) body.innerHTML = '<tr><td colspan="9"><div class="empty">加载失败，请检查 API Key</div></td></tr>';
+  }
+}
+
+function renderAnomalies(data, append) {
+  const rows = data.anomalies || [];
+  const total = data.total || 0;
+  const body = document.getElementById('anomaly-body');
+  document.getElementById('anom-count').textContent = total ? `共 ${total} 条` : '';
+  if (!append) body.innerHTML = '';
+  if (!rows.length && !append) {
+    body.innerHTML = '<tr><td colspan="9"><div class="empty">没有符合条件的异常 ✨</div></td></tr>';
+    document.getElementById('anom-more').style.display = 'none';
+    return;
+  }
+  body.insertAdjacentHTML('beforeend', rows.map(a => {
+    const target = a.category_id != null && a.category_id !== 0 ? `类目 #${a.category_id}` : `商品 #${a.item_id}`;
+    const drop = a.change_pct <= 0 ? `${a.change_pct}%` : `+${a.change_pct}%`;
+    return `
+      <tr>
+        <td>${sevBadge(a.severity)}</td>
+        <td><b>${target}</b></td>
+        <td>${METRIC_LABEL[a.metric] || a.metric}</td>
+        <td><span class="mono">${a.rule_name}</span></td>
+        <td style="color:var(--err); font-weight:600">${drop}</td>
+        <td><span class="mono">${a.date_start.slice(5)} ~ ${a.date_end.slice(5)}</span></td>
+        <td>${statusBadge(a.status)}</td>
+        <td><span class="mono">${a.detected_at.slice(5)}</span></td>
+        <td style="text-align:right">
+          ${a.has_report
+            ? `<button class="btn-report" onclick="openReport(${a.id}, '${target.replace(/'/g, '')}')">查看报告</button>`
+            : `<button class="btn-report" disabled title="该异常尚未自动诊断">未诊断</button>`}
+        </td>
+      </tr>`;
+  }).join(''));
+  const shown = anomState.offset + rows.length;
+  const more = document.getElementById('anom-more');
+  if (shown >= total) {
+    more.style.display = 'none';
+  } else {
+    more.style.display = 'flex';
+    document.getElementById('anom-more-info').textContent = `已显示 ${shown} / ${total}`;
+  }
+}
+
+function renderAlerts(alerts) {
+  const el = document.getElementById('alert-status');
+  el.textContent = alerts.configured
+    ? `告警已配置 → ${alerts.host}`
+    : '告警未配置（.env 设置 ALERT_WEBHOOK_URL 可接钉钉/企微/飞书）';
+}
+
+document.querySelectorAll('#anom-scope button').forEach(btn => {
+  btn.onclick = () => {
+    document.querySelectorAll('#anom-scope button').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    anomState.scope = btn.dataset.scope;
+    anomState.offset = 0;
+    loadAnomalies(false);
+  };
+});
+document.getElementById('anom-diag').addEventListener('change', e => {
+  anomState.diagnosedOnly = e.target.checked;
+  anomState.offset = 0;
+  loadAnomalies(false);
+});
+document.getElementById('anom-more-btn').onclick = () => {
+  anomState.offset += anomState.limit;
+  loadAnomalies(true);
+};
+
+document.getElementById('api-key').value = state.key;
+document.getElementById('api-key').addEventListener('change', e => {
+  state.key = e.target.value.trim();
+  localStorage.setItem('monitor.key', state.key);
+  loadAll();
+});
+
+document.querySelectorAll('#window-seg button').forEach(btn => {
+  btn.onclick = () => {
+    document.querySelectorAll('#window-seg button').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    state.hours = +btn.dataset.hours;
+    state.bucket = state.hours >= 72 ? 6 * 60 : 60;
+    loadAll();
+  };
+});
+
+document.getElementById('auto-refresh').addEventListener('change', e => {
+  state.auto = e.target.checked;
+  if (state.auto) loadAll();
+});
+
+document.getElementById('mode-toggle').addEventListener('click', () => {
+  state.light = !state.light;
+  localStorage.setItem('monitor.light', state.light ? '1' : '0');
+  applyMode();
+});
+
+buildThemePicker();
+applyTheme(state.theme);
+applyMode();
+loadAll();
+loadAnomalies(false);
+setInterval(() => { if (state.auto) loadAll(); }, 30000);
+</script>
+</body>
+</html>

@@ -1,0 +1,54 @@
+# CI 流水线：每次 push / Pull Request 自动执行
+#   1. pytest（67 个测试，全离线 SQLite）
+#   2. gitleaks（密钥泄漏扫描）
+#   3. pip-audit（依赖漏洞扫描）
+#
+# 使用方法：
+#   1. 在 GitHub 创建仓库
+#   2. git remote add origin https://github.com/<你的用户名>/<仓库名>.git
+#   3. git push -u origin master
+#   push 后进入仓库的 Actions 页即可看到流水线结果
+
+name: CI
+
+# 注意：on 加引号是 GitHub 推荐写法，避免 YAML 1.1 把 on 解析成布尔值
+"on":
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+jobs:
+  test:
+    name: pytest + gitleaks + pip-audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: "pip"
+
+      - name: 安装依赖
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pip-audit
+
+      - name: 运行测试（pytest）
+        run: python -m pytest tests/ -q
+
+      - name: 密钥泄漏扫描（gitleaks）
+        run: |
+          # 下载 gitleaks 二进制（免费方案，无需 license）
+          curl -sSfL -o /tmp/gitleaks.tar.gz \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_linux_x64.tar.gz
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp
+          sudo mv /tmp/gitleaks /usr/local/bin/
+          gitleaks detect --source . --no-banner --redact
+
+      - name: 依赖漏洞扫描（pip-audit）
+        run: pip-audit

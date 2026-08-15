@@ -19,9 +19,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from apscheduler.schedulers.blocking import BlockingScheduler  # noqa: E402
 from apscheduler.triggers.cron import CronTrigger  # noqa: E402
+from apscheduler.triggers.interval import IntervalTrigger  # noqa: E402
 
 from app.db import init_db  # noqa: E402
 from app.detection.detector import run_detection  # noqa: E402
+from app.tasks.queue import recover_stale_tasks  # noqa: E402
 
 
 def make_job(days: int):
@@ -39,6 +41,19 @@ def make_job(days: int):
     return _job
 
 
+def make_recover_job():
+    """每 5 分钟回收卡死的 running 任务（Worker 崩溃/断电遗留），保证队列自愈。"""
+    def _job() -> None:
+        try:
+            n = recover_stale_tasks()
+            if n:
+                print(f"[{datetime.now()}] 回收卡死任务 {n} 个，已重置回队列", flush=True)
+        except Exception as e:  # noqa: BLE001  回收失败不中断调度器
+            print(f"[{datetime.now()}] 回收任务异常: {type(e).__name__}: {e}", flush=True)
+
+    return _job
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--hour", type=int, default=0, help="每天几点跑（0-23）")
@@ -50,7 +65,10 @@ def main() -> None:
     scheduler = BlockingScheduler(timezone="Asia/Shanghai")
     scheduler.add_job(make_job(args.days), CronTrigger(hour=args.hour, minute=args.minute),
                       id="daily_detection", replace_existing=True)
+    scheduler.add_job(make_recover_job(), IntervalTrigger(minutes=5),
+                      id="stale_recover", replace_existing=True)
     print(f"调度器启动：每天 {args.hour:02d}:{args.minute:02d} 自动检测（窗口 {args.days} 天）", flush=True)
+    print("（每 5 分钟自动回收卡死的诊断任务）", flush=True)
     print("（Ctrl+C 停止）", flush=True)
     try:
         scheduler.start()

@@ -68,13 +68,58 @@ def test_detection_auto_creates_diagnosis_task():
         assert s.query(Task).filter(Task.task_type == "diagnose").count() == 1
 
 
-def test_category_anomaly_not_auto_diagnosed():
-    """类目级异常（item_id=0）不自动建任务：Agent 工具是商品级。"""
+def test_category_anomaly_auto_diagnosed_with_category_id():
+    """类目级异常（item_id=0）也会自动建任务：payload 附带 category_id，Worker 选锚点。"""
     _clear_anomalies_and_tasks()
     rules = [ConsecutiveDeclineRule("cvr", days=3, drop_pct=0.15)]
     n = run_detection(date(2015, 6, 1), date(2015, 6, 14), rules=rules)
     assert n >= 2  # item1 商品级 + 类目100 类目级都触发
     with read_session() as s:
         assert s.query(AnomalyEvent).filter_by(item_id=0, category_id=100).count() >= 1
-        # 商品级 1 个任务，类目级跳过
-        assert s.query(Task).filter(Task.task_type == "diagnose").count() == 1
+        tasks = s.query(Task).filter(Task.task_type == "diagnose").all()
+        assert len(tasks) == 2  # 商品级 + 类目级各 1 个任务
+        cat_task = next(t for t in tasks if json.loads(t.payload_json)["item_id"] == 0)
+        payload = json.loads(cat_task.payload_json)
+        assert payload["category_id"] == 100
+        assert payload["item_id"] == 0
+        assert cat_task.idempotency_key.startswith("diag-anom:")
+        assert cat_task.anomaly_id is not None
+
+
+def test_find_anchor_item():
+    """类目 100 的锚点商品：窗口内 UV 最高的商品（item1/item2 UV 相同，取其一）。"""
+    from app.detection.detector import find_anchor_item
+
+    anchor = find_anchor_item(100, date(2015, 6, 1), date(2015, 6, 14))
+    assert anchor in (1, 2)
+    # 不存在的类目 → None
+    assert find_anchor_item(999999, date(2015, 6, 1), date(2015, 6, 14)) is None
+
+
+def test_worker_diagnose_category_task_uses_anchor():
+    """类目级任务：Worker 取锚点商品跑诊断（MockLLM 离线），返回 run_id。"""
+    from app.tasks.queue import get_task
+    from app.tasks.worker import _run_diagnose
+
+    _clear_anomalies_and_tasks()
+    with write_session() as s:
+        t = Task(
+            task_type="diagnose",
+            anomaly_id=1,
+            idempotency_key="t-cat-anchor-test",
+            payload_json=json.dumps({
+                "item_id": 0,
+                "category_id": 100,
+                "start_date": "2015-06-01",
+                "end_date": "2015-06-14",
+                "anomaly": "[类目级] 测试异常",
+            }),
+        )
+        s.add(t)
+        s.commit()
+        s.refresh(t)
+        tid = t.id
+
+    result = _run_diagnose(get_task(tid))
+    assert result.get("run_id")
+    assert result.get("status") == "ok"  # MockLLM 离线跑通

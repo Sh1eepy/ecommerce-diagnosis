@@ -6,6 +6,11 @@ __pycache__/
 .pytest_cache/
 # 密钥与本地配置
 .env
+.env.bak
+.env.*.bak
+API_KEY.txt
+# 数据库备份
+backups/
 # 原始数据（约1GB，不入库）
 数据/
 # 运行产物
@@ -14,6 +19,7 @@ feedback/agent_feedback/
 evaluation/evaluation_results.json
 *.log
 dev.db
+tests/.pytest_runtime/
 # IDE
 .idea/
 .vscode/

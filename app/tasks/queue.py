@@ -111,3 +111,29 @@ def get_task(task_id: int) -> Task | None:
 def count_pending() -> int:
     with write_session() as s:
         return s.query(Task).filter(Task.status.in_(["pending", "retrying"])).count()
+
+
+def recover_stale_tasks(max_age_seconds: int = 1800) -> int:
+    """回收卡死的 running 任务（Worker 崩溃/断电遗留），重置回 pending 重新排队。
+
+    - 判定：status='running' 且 started_at 距今超过 max_age_seconds（默认 30 分钟）
+    - 不增加 attempts：恢复不是业务失败，不消耗重试次数
+    - 由调度器每 5 分钟调用 + Worker 启动时自愈调用，双保险
+    """
+    cutoff = utcnow() - timedelta(seconds=max_age_seconds)
+    with write_session() as s:
+        stale = (
+            s.query(Task)
+            .filter(
+                Task.status == "running",
+                Task.started_at.isnot(None),
+                Task.started_at < cutoff,
+            )
+            .all()
+        )
+        for t in stale:
+            t.status = "pending"
+            t.started_at = None  # 清掉旧的启动时间，等待重新 claim
+            t.error = (t.error + "; " if t.error else "") + "stale-recovered"
+        s.commit()
+        return len(stale)

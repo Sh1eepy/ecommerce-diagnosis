@@ -1,11 +1,18 @@
-"""测试基础设施：强制走 SQLite 临时库，避免污染 MySQL 与真实日志。"""
+"""测试基础设施：强制走 SQLite 临时库，避免污染 MySQL 与真实日志。
+
+临时目录用项目内相对路径（tests/.pytest_runtime）而非系统 Temp：
+- 中文项目路径经环境变量（TMP/TEMP）传递时可能被损坏（编码问题），
+  改用相对路径后完全规避；
+- 沙箱/CI 环境下对项目内目录可写，测试在任何环境可跑。
+"""
 import os
+import shutil
 import sys
-import tempfile
 from datetime import date, timedelta
 from pathlib import Path
 
-_tmpdir = Path(tempfile.mkdtemp(prefix="ecom_test_"))
+_tmpdir = Path(__file__).resolve().parent / ".pytest_runtime"
+_tmpdir.mkdir(parents=True, exist_ok=True)
 os.environ["DB_DRIVER"] = "sqlite"
 os.environ["SQLITE_PATH"] = str(_tmpdir / "test.db")
 os.environ["LLM_API_KEY"] = ""  # 空 Key → 强制 MockLLM
@@ -23,19 +30,32 @@ from app.models import DailyItemStat, ItemCategory, ItemPrice  # noqa: E402
 
 @pytest.fixture(scope="session", autouse=True)
 def _setup_db():
+    # 全新环境：清掉可能残留的旧库/日志（Windows 下文件占用可能使上次 rmtree 失败）
+    for p in (_tmpdir / "test.db", _tmpdir / "logs"):
+        try:
+            if p.is_file():
+                p.unlink()
+            elif p.is_dir():
+                shutil.rmtree(p, ignore_errors=True)
+        except OSError:
+            pass
     init_db()
     _seed_daily_stats()
     yield
+    shutil.rmtree(_tmpdir, ignore_errors=True)  # 会话结束清理自建临时目录
 
 
 def _seed_daily_stats() -> None:
-    """构造演示数据：
+    """构造演示数据（幂等：先清空再插入，避免残留库导致 UNIQUE 冲突）：
     - item 1: 前 10 天平稳（cvr=8%），后 4 天 cvr 连续下降 7→6→5→4% → 触发规则
     - item 2: 平稳，不触发
     同时写入 day_type / new_user 维度切片供 Tool 测试。
     """
     base = date(2015, 6, 1)
     with write_session() as s:
+        s.query(DailyItemStat).delete()
+        s.query(ItemCategory).delete()
+        s.query(ItemPrice).delete()
         for item in (1, 2):
             for i in range(14):
                 d = base + timedelta(days=i)

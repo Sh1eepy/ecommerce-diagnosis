@@ -70,6 +70,40 @@ python scripts\run_worker.py
 python scripts\run_scheduler.py
 ```
 
+> 💡 **省事版**：第 6~8 步可以用一键脚本代替，见下节「服务管理」。
+
+## 服务管理（一键启停）
+
+不想开三个终端？项目根目录有两个双击脚本：
+
+| 操作 | 双击 | 效果 |
+|---|---|---|
+| 启动全部 | **`start_all.bat`** | 后台拉起 API + Worker + 调度器（不弹黑窗，日志写 `logs/service/*.log`） |
+| 停止全部 | **`stop_all.bat`** | 按 PID 整树停止三个服务 |
+
+也可以命令行精确控制（`scripts/manage_services.py`）：
+
+```bash
+.venv\Scripts\python.exe scripts\manage_services.py start worker   # 只启动 Worker
+.venv\Scripts\python.exe scripts\manage_services.py stop api       # 只停止 API
+.venv\Scripts\python.exe scripts\manage_services.py status         # 查看三个服务状态
+```
+
+**改代码后重启**：`stop_all.bat` → `start_all.bat`（或对单个服务 stop/start）。
+**查看服务日志**：`logs/service/api.log`、`logs/service/worker.log`、`logs/service/scheduler.log`。
+**日志轮转**：`logs/agent_runs|tool_calls|sql_logs/` 的 JSONL 单文件超 20MB 自动滚动留档（防止 `cli.jsonl` 无限增长）。
+
+## 数据库备份
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\backup_db.ps1            # 备份，保留最近 7 份
+powershell -ExecutionPolicy Bypass -File scripts\backup_db.ps1 -Keep 14   # 保留 14 份
+```
+
+- 备份文件在 `backups/backup_YYYYMMDD_HHMMSS.sql`，自动删除最旧备份
+- 配置从 `.env` 读取；密码走环境变量不进命令行
+- 想每天自动备份：任务计划程序 → 新建任务 → 触发器"每天" → 操作填上面的命令
+
 ## API 一览（前缀 `/api/v1`，需 `X-API-Key` 头）
 
 | 方法 | 路径 | 说明 |
@@ -79,6 +113,15 @@ python scripts\run_scheduler.py
 | GET | `/tasks/{task_id}` | 查询任务状态与结果 |
 | POST | `/import/daily-stat` | CSV 导入日表（写入口，仅服务层） |
 | POST | `/feedback` | 用户对报告打分/反馈 |
+| GET | `/monitoring` | 监控快照（LLM 延迟/错误率/工具耗时/任务积压） |
+| GET | `/monitoring/history` | 历史趋势（按时间桶分组的时序，`hours`/`bucket` 可调） |
+| GET | `/monitoring/slow-queries` | 慢 SQL TopN（扫 sql_logs，`min_ms`/`limit` 可调） |
+| GET | `/monitoring/cost` | LLM token 成本估算（元，单价 `.env` 可配） |
+| GET | `/monitoring/feedback` | 用户反馈聚合（平均分/类别分布） |
+| GET | `/monitoring/anomalies` | 异常事件列表（严重度/降幅/是否有诊断报告） |
+| GET | `/monitoring/reports/{anomaly_id}` | 按异常查诊断报告（未诊断返回 404） |
+| GET | `/monitoring/alerts` | 告警 Webhook 配置状态（只暴露域名） |
+| GET | `/monitoring/dashboard` | **监控面板页面**（浏览器打开；数据接口仍需 Key） |
 | GET | `/docs` | Swagger 文档 |
 
 ```bash
@@ -119,8 +162,10 @@ app/
 ├── llm/                 # Provider: DeepSeek(OpenAI兼容) / Mock
 ├── agent/               # Agent Loop / 3 个只读 Tool / Workflow / prompts
 ├── tasks/               # DB 队列 + asyncio Worker
+├── monitoring_history.py # 监控扩展：趋势分桶/慢SQL/成本/反馈聚合
 └── api/                 # FastAPI 路由
 scripts/                 # 导入/检测/Worker 脚本
+web/dashboard.html       # 监控面板页面（ECharts，深色主题可换色）
 evaluation/              # 黄金用例 + 离线评估
 feedback/agent_feedback/ # 用户反馈
 logs/                    # agent_runs/tool_calls/sql_logs
@@ -135,7 +180,9 @@ tests/                   # pytest（SQLite 全离线）
 - [x] V4：并发限制/重试/幂等/优先级（`app/tasks/`）
 - [x] V5：评估（evaluation/）+ 反馈（feedback/）
 - [x] P0-P3 增强：PeerTool 跨商品对比、类目级异常聚合、真实 LLM 评估基线、告警 Webhook、监控指标、导入提速 7 倍
-- [ ] 后续：价格按日生效 join、Redis/Celery 队列、多 Worker 副本、指标监控面板
+- [x] P5 监控面板：历史趋势分桶 + 慢查询 TopN + token 成本 + 反馈聚合 + ECharts 深色面板（`/monitoring/dashboard`）
+- [x] P5.1 面板增强：亮/暗底色切换 + 异常事件列表（一键跳诊断报告弹窗）+ 告警配置状态
+- [ ] 后续：价格按日生效 join、Redis/Celery 队列、多 Worker 副本
 
 ## 已知口径（Retailrocket 数据）
 

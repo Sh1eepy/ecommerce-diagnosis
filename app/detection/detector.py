@@ -133,14 +133,36 @@ def _add_anomaly(session, item_id: int | None, category_id: int | None, rule, re
     return anom
 
 
+def find_anchor_item(category_id: int, start: date, end: date) -> int | None:
+    """类目级诊断的锚点商品：该类目在窗口内 UV 总量最高的商品。
+
+    Agent 的 4 个工具都是商品级的（参数必填 item_id），类目级异常（item_id=0）
+    无法直接诊断，因此取"该类目最具代表性（UV 最高）"的商品作为锚点样本，
+    用它的数据回答"整个类目为什么崩"。
+    注意：category 维度按 (商品,日期) 存储，须 GROUP BY item_id 聚合 UV。
+    """
+    sql = """SELECT item_id, SUM(uv) AS uv_sum
+             FROM daily_item_stat
+             WHERE dimension_type='category' AND dimension=:cat
+               AND stat_date BETWEEN :start AND :end
+             GROUP BY item_id
+             ORDER BY uv_sum DESC
+             LIMIT 1"""
+    with get_read_engine().connect() as conn:
+        row = conn.execute(
+            text(sql), {"cat": str(category_id), "start": start, "end": end}
+        ).first()
+    return int(row.item_id) if row else None
+
+
 def run_detection(start: date, end: date, rules=None, limit_items: int | None = None,
                   include_categories: bool = True, auto_diagnose: bool = True) -> int:
     """扫描所有商品（+ 类目切片）并落库新的异常事件。同款 open 事件跳过（幂等）。
 
     性能：一次性加载窗口内全部日序列（1 次查询），Python 内按商品/类目批量判定。
     类目级异常：item_id=0 + category_id=类目ID，表示"整个类目带崩"。
-    auto_diagnose=True 时，为新产生的【商品级】异常自动创建诊断任务（类目级暂不诊断，
-    因为 Agent 的工具是商品级）。幂等：重复检测不产生新异常，也就不产生新任务。
+    auto_diagnose=True 时，为新的异常自动创建诊断任务：商品级直接诊断，
+    类目级由 Worker 取该类目 UV 最高商品作锚点后诊断。幂等：重复检测不产生新异常。
     """
     rules = list(rules or DEFAULT_RULES)
     groups = _load_all_series(start, end)
@@ -180,22 +202,24 @@ def run_detection(start: date, end: date, rules=None, limit_items: int | None = 
 def _create_diagnosis_tasks(new_anomalies: list[AnomalyEvent]) -> int:
     """为新异常自动创建诊断任务（懒加载 create_task，避免检测器背上整条 Agent 依赖链）。
 
-    类目级异常（item_id=0）跳过：Agent 的工具（metric/funnel/dimension/peer）都是商品级。
+    类目级异常（item_id=0）：payload 附带 category_id，由 Worker 动态选取该类目
+    UV 最高的商品作锚点后再诊断（Agent 工具是商品级，不能直接喂 item_id=0）。
     """
     from app.tasks.queue import create_task  # 懒加载，避免循环/重依赖
 
     created = 0
     for anom in new_anomalies:
-        if anom.item_id == 0:
-            continue
+        payload = {
+            "item_id": anom.item_id,
+            "start_date": str(anom.date_start - timedelta(days=3)),
+            "end_date": str(anom.date_end),
+            "anomaly": anom.description,
+        }
+        if anom.item_id == 0 and anom.category_id is not None:
+            payload["category_id"] = anom.category_id
         create_task(
             "diagnose",
-            payload={
-                "item_id": anom.item_id,
-                "start_date": str(anom.date_start - timedelta(days=3)),
-                "end_date": str(anom.date_end),
-                "anomaly": anom.description,
-            },
+            payload=payload,
             anomaly_id=anom.id,
             idempotency_key=f"diag-anom:{anom.id}",
         )
