@@ -34,7 +34,8 @@ class Settings(BaseSettings):
     # ---- Agent 安全上限 ----
     AGENT_MAX_STEPS: int = 8
     AGENT_STEP_TIMEOUT_SECONDS: float = 90.0
-    AGENT_TOKEN_BUDGET: int = 16000
+    AGENT_TOTAL_TIMEOUT_SECONDS: float = 300.0
+    AGENT_TOKEN_BUDGET: int = 30000
     TOOL_RESULT_MAX_ROWS: int = 50
     TOOL_RESULT_MAX_CHARS: int = 4000
     LOG_DIR: str = "./logs"

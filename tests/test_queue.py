@@ -5,7 +5,7 @@ import pytest
 
 from app.db import write_session
 from app.models import Task, utcnow
-from app.tasks.queue import recover_stale_tasks
+from app.tasks.queue import complete_task, recover_stale_tasks
 
 
 def _clear_tasks():
@@ -78,6 +78,16 @@ def test_recover_custom_threshold():
     assert recover_stale_tasks(max_age_seconds=30) == 1
     with write_session() as s:
         assert s.get(Task, tid).status == "pending"
+
+
+def test_incomplete_agent_result_is_not_marked_succeeded():
+    _clear_tasks()
+    tid = _add_task("running", started_at=utcnow())
+    complete_task(tid, {"status": "incomplete", "stop_reason": "token_budget"}, "run-x")
+    with write_session() as s:
+        task = s.get(Task, tid)
+        assert task.status == "incomplete"
+        assert task.run_id == "run-x"
 
 
 def test_worker_survives_db_error(monkeypatch):

@@ -683,12 +683,19 @@ function renderReport(rep) {
       <span>诊断时间 <b>${rep.created_at}</b></span>
     </div>
     ${facts.length ? `<div class="rep-sec">调查事实（工具取证）</div>` +
-      facts.map(f => `<div class="fact"><div class="point">${esc(f.point)}</div><div class="evidence">${esc(f.evidence)}</div></div>`).join('') : ''}
+      facts.map(f => {
+        const ref = f.evidence_ref || {};
+        const evidence = f.evidence || [ref.call_id, ref.path].filter(Boolean).join(' · ');
+        return `<div class="fact"><div class="point">${esc(f.point)}</div><div class="evidence">${esc(evidence)}</div></div>`;
+      }).join('') : ''}
     ${analysis.key_finding ? `<div class="rep-sec">关键发现</div><div class="rep-text">${esc(analysis.key_finding)}</div>` : ''}
     ${analysis.impact ? `<div class="rep-sec">影响评估</div><div class="rep-text">${esc(analysis.impact)}</div>` : ''}
     ${r.conclusion ? `<div class="rep-sec">结论</div><div class="rep-text"><b>${esc(r.conclusion)}</b></div>` : ''}
     ${suggestions.length ? `<div class="rep-sec">建议措施</div>` +
-      suggestions.map((s, i) => `<div class="sugg"><span class="n">${i + 1}</span><span>${esc(s)}</span></div>`).join('') : ''}
+      suggestions.map((s, i) => {
+        const text = typeof s === 'string' ? s : `${s.action || ''}（${s.owner || '待指定'}；验收：${s.success_metric || '待定义'}）`;
+        return `<div class="sugg"><span class="n">${i + 1}</span><span>${esc(text)}</span></div>`;
+      }).join('') : ''}
   `;
 }
 

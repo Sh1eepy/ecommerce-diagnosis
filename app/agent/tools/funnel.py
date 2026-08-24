@@ -28,6 +28,12 @@ class FunnelTool(Tool):
         end = validate_date(end_date)
 
         f = compute.funnel(item_id, start, end)
+        # 统一暴露相邻环节转化率，减少模型对字段名的猜测。
+        for stage in f["stages"]:
+            if stage["stage"] == "addtocart":
+                stage["rate"] = stage.get("rate_from_view", 0.0)
+            elif stage["stage"] == "transaction":
+                stage["rate"] = stage.get("rate_from_addcart", 0.0)
         lines = [f"商品 {item_id} 漏斗（{start}~{end}）:"]
         for s in f["stages"]:
             extra = []

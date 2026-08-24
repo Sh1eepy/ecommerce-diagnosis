@@ -60,5 +60,10 @@ class MetricTool(Tool):
             "ok": True,
             "text": "\n".join(lines),
             "rows": len(series),
-            "data": {"series": series, "summary": summary},
+            "data": {
+                "series": series,
+                "summary": summary,
+                "price": price,
+                "unavailable_dates": [u["date"] for u in unavailable],
+            },
         }

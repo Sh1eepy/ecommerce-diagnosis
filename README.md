@@ -14,12 +14,13 @@ events.csv ──导入聚合──► daily_item_stat 宽表(UV/曝光/点击/�
                               ▼
                      DB 任务队列 + asyncio Worker(并发限制/重试/幂等/优先级/状态)
                               ▼
-         Workflow 固定流程: 确认异常→历史趋势→定位环节→维度拆解→综合证据→报告
+         调查状态: 假设→选择高信息增益工具→证据→更新置信度→报告质量门槛
                               ▼
                  Agent Loop (max_steps / timeout / token预算 / 工具白名单)
                  ├─ MetricTool ─┐ 全部走 agent_ro 只读连接(仅SELECT)
                  ├─ FunnelTool ─┤ 参数化SQL + 结果上限 + 审计日志(run_id)
-                 └─ DimensionTool┘
+                 ├─ DimensionTool┤
+                 └─ PeerTool ────┘
                               ▼
              结构化报告(现象-原因-建议) + 告警(接口预留)
                 ▲
@@ -133,7 +134,7 @@ curl -X POST http://127.0.0.1:8000/api/v1/diagnostics \
 ## 权限与安全设计
 
 1. **数据库层**：`agent_ro` 仅 `SELECT`（已实测写操作被拒）；Tool 全部参数化 SQL + 窗口/行数上限。
-2. **Agent 层**：工具白名单（仅 metric/funnel/dimension）、`max_steps`、单步/总 timeout、token 预算、Context 裁剪。
+2. **Agent 层**：工具白名单（metric/funnel/dimension/peer）、`max_steps`、单步/总 timeout、token 预算、Context 裁剪、证据引用与报告质量门槛。
 3. **API 层**：`X-API-Key` 认证 + 每分钟限流 + 文件类型/大小校验 + **安全响应头**（nosniff/X-Frame-Options/no-store/CSP）。
 4. **写路径隔离**：Agent 无任何写能力；数据导入/任务状态更新只走服务层。
 5. **审计**：每次工具调用写 `tool_call_log`（DB）+ `logs/tool_calls/`（JSONL），全链路 `run_id`。
@@ -160,7 +161,7 @@ app/
 ├── metrics/             # 指标注册表(口径唯一来源) + 计算
 ├── detection/           # 规则引擎 + 检测器（不碰 LLM）
 ├── llm/                 # Provider: DeepSeek(OpenAI兼容) / Mock
-├── agent/               # Agent Loop / 3 个只读 Tool / Workflow / prompts
+├── agent/               # Agent Loop / 调查状态与质量门槛 / 4 个只读 Tool / prompts
 ├── tasks/               # DB 队列 + asyncio Worker
 ├── monitoring_history.py # 监控扩展：趋势分桶/慢SQL/成本/反馈聚合
 └── api/                 # FastAPI 路由
@@ -182,6 +183,7 @@ tests/                   # pytest（SQLite 全离线）
 - [x] P0-P3 增强：PeerTool 跨商品对比、类目级异常聚合、真实 LLM 评估基线、告警 Webhook、监控指标、导入提速 7 倍
 - [x] P5 监控面板：历史趋势分桶 + 慢查询 TopN + token 成本 + 反馈聚合 + ECharts 深色面板（`/monitoring/dashboard`）
 - [x] P5.1 面板增强：亮/暗底色切换 + 异常事件列表（一键跳诊断报告弹窗）+ 告警配置状态
+- [x] Agent V2：显式“假设—证据—置信度”状态、线索驱动分支调查、四维质量评估、失败报告不再误记成功
 - [ ] 后续：价格按日生效 join、Redis/Celery 队列、多 Worker 副本
 
 ## 已知口径（Retailrocket 数据）

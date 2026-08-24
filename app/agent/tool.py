@@ -79,4 +79,27 @@ class ToolRegistry:
                 "rows": 0,
                 "data": None,
             }
+        error = self._validate_args(tool, args)
+        if error:
+            return {"ok": False, "text": f"工具参数不合法: {error}", "rows": 0, "data": None}
         return tool.execute(args, run_id=run_id, step=step)
+
+    @staticmethod
+    def _validate_args(tool: Tool, args: dict) -> str:
+        """执行前做最小 JSON Schema 校验；业务范围仍由各 Tool 校验。"""
+        if not isinstance(args, dict):
+            return "args 必须是对象"
+        schema = tool.parameters or {}
+        props = schema.get("properties") or {}
+        missing = [k for k in schema.get("required") or [] if k not in args]
+        if missing:
+            return "缺少必填参数: " + ", ".join(missing)
+        unknown = sorted(set(args) - set(props))
+        if unknown:
+            return "未知参数: " + ", ".join(unknown)
+        types = {"integer": int, "string": str, "array": list, "object": dict, "boolean": bool}
+        for key, value in args.items():
+            expected = types.get((props.get(key) or {}).get("type"))
+            if expected and (not isinstance(value, expected) or expected is int and isinstance(value, bool)):
+                return f"参数 {key} 类型错误"
+        return ""

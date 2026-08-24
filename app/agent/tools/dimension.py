@@ -47,4 +47,10 @@ class DimensionTool(Tool):
         for r in rows:
             parts = [f"  {r['dimension']}"] + [f"{m}={r[m]}" for m in metric_names]
             lines.append(" ".join(parts))
-        return {"ok": True, "text": "\n".join(lines), "rows": len(rows), "data": rows}
+        by_dimension = {str(r["dimension"]): r for r in rows}
+        return {
+            "ok": True,
+            "text": "\n".join(lines),
+            "rows": len(rows),
+            "data": {"rows": rows, "by_dimension": by_dimension, **by_dimension},
+        }

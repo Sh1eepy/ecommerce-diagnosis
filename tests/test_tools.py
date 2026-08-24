@@ -44,8 +44,9 @@ def test_dimension_tool():
         "metrics": ["uv", "cvr"],
     }, run_id=set_run_id("t3"), step=1)
     assert res["ok"] is True
-    dims = {r["dimension"] for r in res["data"]}
+    dims = {r["dimension"] for r in res["data"]["rows"]}
     assert dims == {"new", "returning"}
+    assert res["data"]["new"]["uv"] > 0
 
 
 def test_invalid_item_id_rejected():

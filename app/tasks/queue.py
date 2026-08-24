@@ -73,7 +73,8 @@ def complete_task(task_id: int, result: dict, run_id: str | None = None) -> None
         t = s.get(Task, task_id)
         if t is None:
             return
-        t.status = "succeeded"
+        # Agent 证据不足/预算耗尽不等于队列执行成功，保留真实完成语义。
+        t.status = "succeeded" if result.get("status") == "ok" else "incomplete"
         t.result_json = json.dumps(result, ensure_ascii=False)
         t.run_id = run_id
         t.finished_at = utcnow()

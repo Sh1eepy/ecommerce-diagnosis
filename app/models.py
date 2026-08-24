@@ -165,7 +165,7 @@ class ToolCallLog(Base):
 
 
 class Task(Base):
-    """任务队列表（DB 队列）。状态机：pending→running→succeeded|failed|retrying。"""
+    """任务队列表。状态机：pending→running→succeeded|incomplete|failed|retrying。"""
 
     __tablename__ = "task"
 

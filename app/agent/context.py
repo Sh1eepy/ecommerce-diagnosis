@@ -28,12 +28,28 @@ def build_initial_messages(tools_desc: list[dict], item_id: int, start: str, end
     ]
 
 
-def append_tool_result(messages: list[dict], tool_name: str, result: dict) -> None:
+def append_tool_result(
+    messages: list[dict], tool_name: str, result: dict,
+    *, call_id: str | None = None, evidence: dict | None = None,
+) -> None:
     if result.get("ok"):
         content = f"[工具 {tool_name} 返回]\n{result.get('text', '')}"
+        if call_id and evidence:
+            content += (
+                f"\n[结构化证据 {call_id}]\n"
+                + json.dumps(evidence.get("data"), ensure_ascii=False, default=str)
+                + "\n报告 evidence_ref.path 必须严格从以上 JSON 根节点逐级选择。"
+            )
     else:
         content = f"[工具 {tool_name} 执行失败]\n{result.get('text', '')}"
     messages.append({"role": "user", "content": content})
+
+
+def append_investigation_state(messages: list[dict], state: dict) -> None:
+    messages.append({
+        "role": "user",
+        "content": "[当前调查状态]\n" + json.dumps(state, ensure_ascii=False),
+    })
 
 
 def truncate_context(messages: list[dict], max_chars: int = CONTEXT_MAX_CHARS) -> list[dict]:
@@ -47,10 +63,13 @@ def truncate_context(messages: list[dict], max_chars: int = CONTEXT_MAX_CHARS) -
     if first_user:
         kept.append(first_user)
     total = sum(len(m["content"]) for m in kept)
-    for m in tail:
+    # 从尾部倒序选择，确保真正保留最新证据，再恢复消息原顺序。
+    recent = []
+    for m in reversed(tail):
         m_len = len(m["content"])
         if total + m_len > max_chars:
-            break
-        kept.append(m)
+            continue
+        recent.append(m)
         total += m_len
+    kept.extend(reversed(recent))
     return kept

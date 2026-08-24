@@ -68,6 +68,7 @@ class PeerTool(Tool):
                 "category_id": cat,
                 "own": own["current"],
                 "category_total": cat_total,
+                "category": cat_total,
                 "peers": peers["peers"] if peers else None,
                 "top_peers": top,
             },
