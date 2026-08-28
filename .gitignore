@@ -29,7 +29,9 @@ tests/.pytest_runtime/
 /AGENTS.md
 /.codex/
 /.agents/
-/docs/安全加固与学习进度.md
+# 对外只发布项目思路；学习、运维与验收材料本地保留
+/docs/*
+!/docs/项目思路.md
 # IDE
 .idea/
 .vscode/
