@@ -15,6 +15,16 @@ def test_alert_disabled_noop(monkeypatch):
     assert sent is False
 
 
+def test_incomplete_report_is_never_alerted(monkeypatch):
+    monkeypatch.setattr(settings, "ALERT_WEBHOOK_URL", "https://hook.test/alert")
+
+    def must_not_post(*args, **kwargs):
+        raise AssertionError("incomplete report must not be posted")
+
+    monkeypatch.setattr("app.alerting.httpx.post", must_not_post)
+    assert send_diagnosis_alert({"run_id": "x", "status": "incomplete"}) is False
+
+
 def test_alert_posts_signed_payload(monkeypatch):
     captured = {}
 
@@ -41,6 +51,7 @@ def test_alert_posts_signed_payload(monkeypatch):
     assert sent is True
     assert captured["url"] == "https://hook.test/alert"
     assert "X-Alert-Signature" in captured["headers"]
+    assert captured["headers"]["X-Idempotency-Key"] == "diagnosis-alert:abc"
     body = captured["body"].decode("utf-8")
     assert "abc" in body
     assert "成交归零" in body

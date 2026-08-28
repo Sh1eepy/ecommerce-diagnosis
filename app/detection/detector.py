@@ -26,7 +26,7 @@ def _fetch_series(item_id: int, metric: str, start: date, end: date) -> list[tup
               WHERE item_id=:item_id AND dimension_type='all' AND dimension='all'
                 AND stat_date BETWEEN :start AND :end ORDER BY stat_date"""
     with get_read_engine().connect() as conn:
-        rows = conn.execute(text(sql), {"item_id": item_id, "start": start, "end": end}).mappings()
+        rows = conn.execute(text(sql).bindparams(item_id=item_id, start=start, end=end)).mappings()
         series = []
         for r in rows:
             row = compute_metrics(dict(r), [metric])
@@ -47,7 +47,7 @@ def _load_all_series(start: date, end: date) -> dict[int, list[tuple[date, dict]
               ORDER BY item_id, stat_date"""
     groups: dict[int, list[tuple[date, dict]]] = {}
     with get_read_engine().connect() as conn:
-        rows = conn.execute(text(sql), {"start": start, "end": end}).mappings()
+        rows = conn.execute(text(sql).bindparams(start=start, end=end)).mappings()
         for r in rows:
             d = r["stat_date"]
             if isinstance(d, str):
@@ -89,7 +89,7 @@ def _load_all_category_series(start: date, end: date) -> dict[int, list[tuple[da
               ORDER BY dimension, stat_date"""
     groups: dict[int, list[tuple[date, dict]]] = {}
     with get_read_engine().connect() as conn:
-        rows = conn.execute(text(sql), {"start": start, "end": end}).mappings()
+        rows = conn.execute(text(sql).bindparams(start=start, end=end)).mappings()
         for r in rows:
             try:
                 cat = int(r["dimension"])
@@ -150,9 +150,22 @@ def find_anchor_item(category_id: int, start: date, end: date) -> int | None:
              LIMIT 1"""
     with get_read_engine().connect() as conn:
         row = conn.execute(
-            text(sql), {"cat": str(category_id), "start": start, "end": end}
+            text(sql).bindparams(cat=str(category_id), start=start, end=end)
         ).first()
     return int(row.item_id) if row else None
+
+
+def _detect_group(session, raw_rows, rules, *, item_id=None, category_id=None) -> list[AnomalyEvent]:
+    """商品/类目共用“指标计算→规则判断→幂等记录”；事务由调用方统一控制。"""
+    anomalies = []
+    for rule in rules:
+        series = [(d, compute_metrics(row, [rule.metric])[rule.metric]) for d, row in raw_rows]
+        result = rule.evaluate(series)
+        if result is not None:
+            anomaly = _add_anomaly(session, item_id, category_id, rule, result)
+            if anomaly is not None:
+                anomalies.append(anomaly)
+    return anomalies
 
 
 def run_detection(start: date, end: date, rules=None, limit_items: int | None = None,
@@ -174,23 +187,10 @@ def run_detection(start: date, end: date, rules=None, limit_items: int | None = 
     new_anomalies: list[AnomalyEvent] = []
     with write_session() as session:
         for item_id in items:
-            raw_rows = groups[item_id]
-            for rule in rules:
-                series = [(d, compute_metrics(row, [rule.metric])[rule.metric]) for d, row in raw_rows]
-                res = rule.evaluate(series)
-                if res is not None:
-                    anom = _add_anomaly(session, item_id, None, rule, res)
-                    if anom:
-                        new_anomalies.append(anom)
+            new_anomalies.extend(_detect_group(session, groups[item_id], rules, item_id=item_id))
 
         for cat, raw_rows in cat_groups.items():
-            for rule in rules:
-                series = [(d, compute_metrics(row, [rule.metric])[rule.metric]) for d, row in raw_rows]
-                res = rule.evaluate(series)
-                if res is not None:
-                    anom = _add_anomaly(session, None, cat, rule, res)
-                    if anom:
-                        new_anomalies.append(anom)
+            new_anomalies.extend(_detect_group(session, raw_rows, rules, category_id=cat))
 
         session.commit()
 

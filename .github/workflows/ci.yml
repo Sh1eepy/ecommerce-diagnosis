@@ -1,5 +1,5 @@
 # CI 流水线：每次 push / Pull Request 自动执行
-#   1. pytest（67 个测试，全离线 SQLite）
+#   1. pytest（全离线 SQLite；弃用提醒作为错误，防止旧接口回归）
 #   2. gitleaks（密钥泄漏扫描）
 #   3. pip-audit（依赖漏洞扫描）
 #
@@ -39,7 +39,7 @@ jobs:
           pip install pip-audit
 
       - name: 运行测试（pytest）
-        run: python -m pytest tests/ -q
+        run: python -m pytest tests/ -q -W error::DeprecationWarning
 
       - name: 密钥泄漏扫描（gitleaks）
         run: |

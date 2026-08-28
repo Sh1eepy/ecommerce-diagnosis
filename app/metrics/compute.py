@@ -12,16 +12,13 @@ from datetime import date, datetime, time, timedelta
 from sqlalchemy import text
 
 from app.db import get_read_engine
-from app.metrics.registry import BASE_COLUMNS, compute_metrics, funnel_stages
+from app.metrics.registry import ALLOWED_DIMENSIONS, BASE_COLUMNS, compute_metrics
+from app.metrics.windows import DATE_RANGE_MAX_DAYS, check_range as _check_range, compare_windows, paired_windows
 
-DATE_RANGE_MAX_DAYS = 90
 
-
-def _check_range(start: date, end: date) -> None:
-    if start > end:
-        raise ValueError("start 不能晚于 end")
-    if (end - start).days > DATE_RANGE_MAX_DAYS:
-        raise ValueError(f"查询窗口超过 {DATE_RANGE_MAX_DAYS} 天上限")
+def _sum_columns() -> str:
+    # 列名只来自代码常量，不接收模型输入。
+    return ", ".join(f"COALESCE(SUM({column}),0) AS {column}" for column in BASE_COLUMNS)
 
 
 def _date_to_ms(d: date) -> int:
@@ -29,8 +26,22 @@ def _date_to_ms(d: date) -> int:
 
 
 def _rows(sql: str, params: dict) -> list[dict]:
+    # bindparams 从值推导 SQL 类型，让方言处理 date，不依赖 sqlite3 的弃用适配器。
+    statement = text(sql).bindparams(**params)
     with get_read_engine().connect() as conn:
-        return [dict(r) for r in conn.execute(text(sql), params).mappings()]
+        return [dict(r) for r in conn.execute(statement).mappings()]
+
+
+def _daily_totals(item_id: int, start: date, end: date,
+                  dimension_type: str = "all", dimension: str = "all") -> list[dict]:
+    """调用方先校验单窗口；此处也服务于已校验的相邻双窗口查询。"""
+    return _rows(
+        f"""SELECT stat_date, {_sum_columns()} FROM daily_item_stat
+            WHERE item_id=:item_id AND stat_date BETWEEN :start AND :end
+              AND dimension_type=:dt AND dimension=:d
+            GROUP BY stat_date ORDER BY stat_date""",
+        {"item_id": item_id, "start": start, "end": end, "dt": dimension_type, "d": dimension},
+    )
 
 
 def daily_series(
@@ -43,15 +54,7 @@ def daily_series(
 ) -> list[dict]:
     """商品在窗口内的日指标序列。"""
     _check_range(start, end)
-    cols = ", ".join(BASE_COLUMNS)
-    rows = _rows(
-        f"""SELECT stat_date, {cols}
-            FROM daily_item_stat
-            WHERE item_id = :item_id AND stat_date BETWEEN :start AND :end
-              AND dimension_type = :dt AND dimension = :d
-            ORDER BY stat_date""",
-        {"item_id": item_id, "start": start, "end": end, "dt": dimension_type, "d": dimension},
-    )
+    rows = _daily_totals(item_id, start, end, dimension_type, dimension)
     out = []
     for r in rows:
         out.append({"date": str(r["stat_date"]), **compute_metrics(r, metric_names)})
@@ -60,43 +63,23 @@ def daily_series(
 
 def item_summary(item_id: int, start: date, end: date, metric_names: list[str]) -> dict:
     """窗口汇总 + 与上一等长窗口对比（用于"历史趋势/环比"）。"""
-    _check_range(start, end)
-    span = (end - start).days + 1
-    prev_start = start - timedelta(days=span)
-    cols = ", ".join(f"COALESCE(SUM({c}),0) AS {c}" for c in BASE_COLUMNS)
+    return item_comparison(item_id, start, end, metric_names)["summary"]
 
-    def _agg(s: date, e: date) -> list[dict]:
-        return _rows(
-            f"""SELECT {cols}
-                FROM daily_item_stat
-                WHERE item_id=:item_id AND dimension_type='all' AND dimension='all'
-                  AND stat_date BETWEEN :start AND :end""",
-            {"item_id": item_id, "start": s, "end": e},
-        )
 
-    cur_rows = _agg(start, end)
-    prev_rows = _agg(prev_start, start - timedelta(days=1))
-    cur = compute_metrics(cur_rows[0], metric_names) if cur_rows else {m: 0.0 for m in metric_names}
-    prev = compute_metrics(prev_rows[0], metric_names) if prev_rows else None
-    return {"window": [str(prev_start), str(end)], "current": cur, "previous": prev}
+def item_comparison(item_id: int, start: date, end: date, metric_names: list[str]) -> dict:
+    """一次取双窗口原始日汇总，同时供日序列、汇总、覆盖和变化量使用。"""
+    previous_start = paired_windows(start, end)["previous"][0]
+    rows = _daily_totals(item_id, previous_start, end)
+    daily = [{"date": str(row["stat_date"]), **{c: row[c] for c in BASE_COLUMNS}} for row in rows]
+    return {"series": [{"date": row["date"], **compute_metrics(row, metric_names)} for row in daily
+                       if str(start) <= row["date"] <= str(end)],
+            "summary": compare_windows(daily, start, end, metric_names)}
 
 
 def funnel(item_id: int, start: date, end: date) -> dict:
     """商品窗口漏斗：view → addtocart → transaction。"""
     _check_range(start, end)
-    cols = (
-        "COALESCE(SUM(view_count),0) AS view_count, "
-        "COALESCE(SUM(addtocart_count),0) AS addtocart_count, "
-        "COALESCE(SUM(transaction_count),0) AS transaction_count"
-    )
-    rows = _rows(
-        f"""SELECT {cols}
-            FROM daily_item_stat
-            WHERE item_id=:item_id AND dimension_type='all' AND dimension='all'
-              AND stat_date BETWEEN :start AND :end""",
-        {"item_id": item_id, "start": start, "end": end},
-    )
-    r = rows[0] if rows else {}
+    r = item_summary_raw(item_id, start, end)
     v, a, t = r.get("view_count", 0), r.get("addtocart_count", 0), r.get("transaction_count", 0)
     return {
         "stages": [
@@ -113,7 +96,7 @@ def funnel(item_id: int, start: date, end: date) -> dict:
 def item_unavailable_periods(item_id: int, start: date, end: date) -> list[dict]:
     """商品在窗口内的不可用记录（available=0 的变更点）。
 
-    available 来自 item_properties（未哈希），是"商品下架→成交骤降"的直接证据。
+    这是状态观察点，不是整个窗口不可售或成交下降因果关系的证明。
     """
     _check_range(start, end)
     rows = _rows(
@@ -140,9 +123,9 @@ def dimension_breakdown(
 ) -> list[dict]:
     """按维度值拆解（channel/device/user_type/activity/day_type/new_user...）。"""
     _check_range(start, end)
-    if dimension_type not in {"day_type", "new_user", "category", "channel", "device", "user_type", "activity"}:
+    if dimension_type not in ALLOWED_DIMENSIONS:
         raise ValueError(f"不支持的维度类型: {dimension_type}")
-    cols = ", ".join(f"COALESCE(SUM({c}),0) AS {c}" for c in BASE_COLUMNS)
+    cols = _sum_columns()
     rows = _rows(
         f"""SELECT dimension, {cols}
             FROM daily_item_stat
@@ -173,7 +156,8 @@ def _agg_over_window(cols_sql: str, where_sql: str, params: dict) -> dict:
 
 def category_total_raw(category_id: int, start: date, end: date) -> dict:
     """类目整体在窗口内的原始聚合行（SUM 各基础列）。"""
-    cols = ", ".join(f"COALESCE(SUM({c}),0) AS {c}" for c in BASE_COLUMNS)
+    _check_range(start, end)
+    cols = _sum_columns()
     return _agg_over_window(
         cols,
         "dimension_type='category' AND dimension=:cat AND stat_date BETWEEN :start AND :end",
@@ -188,8 +172,9 @@ def category_summary(category_id: int, start: date, end: date, metric_names: lis
 
 
 def item_summary_raw(item_id: int, start: date, end: date) -> dict:
-    """商品自身在窗口内的原始聚合行（用于从类目总量中扣减）。"""
-    cols = ", ".join(f"COALESCE(SUM({c}),0) AS {c}" for c in BASE_COLUMNS)
+    """商品自身在窗口内的原始聚合行，供漏斗等单窗口查询复用。"""
+    _check_range(start, end)
+    cols = _sum_columns()
     return _agg_over_window(
         cols,
         "item_id=:item_id AND dimension_type='all' AND dimension='all' AND stat_date BETWEEN :start AND :end",
@@ -198,18 +183,25 @@ def item_summary_raw(item_id: int, start: date, end: date) -> dict:
 
 
 def peers_stats(item_id: int, start: date, end: date, metric_names: list[str]) -> dict | None:
-    """同类目排除自身后的同行汇总指标；无类目返回 None。"""
+    """同类目排除自身后的单窗口同行指标；保留既有类目切片减自身口径。"""
+    _check_range(start, end)
     cat = item_category_id(item_id)
     if cat is None:
         return None
-    cat_row = category_total_raw(cat, start, end)
-    own_row = item_summary_raw(item_id, start, end)
-    peer_row = {c: cat_row.get(c, 0) - own_row.get(c, 0) for c in BASE_COLUMNS}
-    return {"category_id": cat, "peers": compute_metrics(peer_row, metric_names)}
+    category = category_total_raw(cat, start, end)
+    own = item_summary_raw(item_id, start, end)
+    return {"category_id": cat, "peers": peers_from_totals(category, own, metric_names)}
+
+
+def peers_from_totals(category: dict, own: dict, metric_names: list[str]) -> dict:
+    """复用已读取的单窗口原始汇总，避免为派生指标重复查库。"""
+    peer_row = {c: category.get(c, 0) - own.get(c, 0) for c in BASE_COLUMNS}
+    return compute_metrics(peer_row, metric_names)
 
 
 def peer_items(category_id: int, start: date, end: date, limit: int = 5) -> list[dict]:
     """同类目 UV TOP N 商品列表（对照样本）。"""
+    _check_range(start, end)
     rows = _rows(
         """SELECT s.item_id, SUM(s.uv) AS uv
            FROM daily_item_stat s

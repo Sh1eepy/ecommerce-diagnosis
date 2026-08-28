@@ -23,3 +23,14 @@ class Workflow:
             f"成功工具: {', '.join(self.used_tools()) or '无'}；"
             f"失败工具: {', '.join(sorted(self.failed)) or '无'}"
         )
+
+    def to_dict(self) -> dict:
+        return {"used": sorted(self.used), "failed": sorted(self.failed)}
+
+    @classmethod
+    def from_dict(cls, raw: dict | None) -> "Workflow":
+        workflow = cls()
+        raw = raw if isinstance(raw, dict) else {}
+        workflow.used = {str(x) for x in raw.get("used") or []}
+        workflow.failed = {str(x) for x in raw.get("failed") or []}
+        return workflow

@@ -5,11 +5,11 @@ from app.config import settings
 from app.llm.base import LLMClient, LLMResponse
 
 
-def get_llm() -> LLMClient:
+def get_llm(*, max_retries: int | None = None) -> LLMClient:
     if settings.LLM_API_KEY:
         from app.llm.deepseek import DeepSeekClient
 
-        return DeepSeekClient()
+        return DeepSeekClient(max_retries=max_retries)
     from app.llm.mock import MockLLM
 
     return MockLLM()

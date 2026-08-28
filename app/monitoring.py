@@ -23,7 +23,10 @@ def collect_monitoring(window_hours: int = 24) -> dict:
         task_rows = s.query(Task).filter(Task.created_at >= since).all()
         open_anomalies = s.query(AnomalyEvent).filter_by(status="open").count()
 
-    run_err = [r for r in runs if r.status == "error"]
+    run_err = [r for r in runs if r.status in {"error", "failed"}]
+    run_status: dict[str, int] = {}
+    for r in runs:
+        run_status[r.status] = run_status.get(r.status, 0) + 1
     tool_err = [t for t in tools if t.status == "error"]
 
     tool_counts: dict[str, int] = {}
@@ -38,7 +41,11 @@ def collect_monitoring(window_hours: int = 24) -> dict:
         "window_hours": window_hours,
         "agent_runs": {
             "total": len(runs),
-            "succeeded": len(runs) - len(run_err),
+            "succeeded": run_status.get("succeeded", 0),
+            "incomplete": run_status.get("incomplete", 0),
+            "retrying": run_status.get("retrying", 0),
+            "running": run_status.get("running", 0),
+            "by_status": run_status,
             "error": len(run_err),
             "error_rate": round(len(run_err) / len(runs), 3) if runs else 0.0,
             "avg_duration_ms": _avg([r.duration_ms for r in runs]),

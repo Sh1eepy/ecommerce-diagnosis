@@ -273,6 +273,16 @@
   .rep-sec { margin: 16px 0 8px; font-size: 13px; font-weight: 700; color: var(--c2); display: flex; align-items: center; gap: 7px; }
   .rep-sec::before { content: ""; width: 8px; height: 8px; border-radius: 2px; background: linear-gradient(135deg, var(--c1), var(--c3)); transform: rotate(45deg); }
   .rep-text { font-size: 14px; line-height: 1.65; color: var(--text-dim); }
+  .modal-body { overflow-wrap: anywhere; }
+  .review-form label { display: block; margin: 12px 0; line-height: 1.7; }
+  .review-form textarea { display: block; width: 100%; min-height: 72px; padding: 10px; box-sizing: border-box;
+    background: var(--bg); color: var(--text); border: 1px solid var(--card-border); border-radius: 8px; resize: vertical; }
+  .review-form select { margin-left: 12px; padding: 6px; }
+  .rep-notice { padding: 10px 13px; border: 1px solid var(--warn); border-radius: 9px; color: var(--text); font-size: 13px; line-height: 1.6; }
+  .rep-list { padding-left: 20px; color: var(--text-dim); font-size: 13.5px; line-height: 1.65; }
+  .rep-list li + li { margin-top: 5px; }
+  .sugg > div { min-width: 0; }
+  .sugg-detail { color: var(--text-dim); font-size: 12.5px; line-height: 1.6; margin-top: 4px; }
   .sugg { display: flex; gap: 9px; align-items: flex-start; font-size: 13.5px; color: var(--text); padding: 6px 0; }
   .sugg .n { flex: none; width: 20px; height: 20px; border-radius: 50%; background: linear-gradient(135deg, var(--c1), var(--c2)); color: #fff; font-size: 11.5px; font-weight: 700; display: grid; place-items: center; margin-top: 1px; }
   .rep-null { text-align: center; padding: 30px 10px; color: var(--text-faint); }
@@ -307,7 +317,7 @@
     </div>
     <div class="themes" id="theme-picker" title="主题配色"></div>
     <button class="icon-btn" id="mode-toggle" title="切换黑白底色">🌙</button>
-    <input class="key-input" id="api-key" type="password" placeholder="X-API-Key" autocomplete="off">
+    <input class="key-input" id="api-key" type="password" placeholder="X-API-Key" autocomplete="off" title="仅在当前页面内存中保存，刷新后需重新输入">
     <label class="switch"><input type="checkbox" id="auto-refresh" checked><span class="track"></span><span>自动刷新</span></label>
   </div>
 </header>
@@ -374,6 +384,7 @@
         <div class="fb-meta" id="fb-meta">暂无反馈</div>
         <div class="fb-histo" id="fb-histo"></div>
         <div class="fb-chips" id="fb-chips"></div>
+        <div class="fb-meta" id="fb-reviews"></div>
       </div>
     </div>
   </section>
@@ -404,10 +415,12 @@ const METRIC_LABEL = {
   uv: 'UV', view_count: '曝光', per_user_views: '人均浏览', click_rate: '点击率',
   addcart_rate: '加购率', cvr: '转化率', cart_to_pay: '加购转支付', gmv: 'GMV', avg_price: '客单价',
 };
+// 不持久保存 API Key；清除旧版本留下的凭据，刷新后由用户重新输入。
+try { localStorage.removeItem('monitor.key'); } catch (_) {}
 const state = {
   hours: 24,
   bucket: 60,
-  key: localStorage.getItem('monitor.key') || '',
+  key: '',
   auto: true,
   theme: localStorage.getItem('monitor.theme') || 'aurora',
   light: localStorage.getItem('monitor.light') === '1',
@@ -453,14 +466,25 @@ function buildThemePicker() {
 }
 
 /* ================= API 封装 ================= */
-async function api(path, params = {}) {
+async function api(path, params = {}, body = null) {
+  if (!state.key) throw Object.assign(new Error('AUTH'), {status: 401});
   const qs = new URLSearchParams(Object.entries(params)).toString();
   const res = await fetch(`/api/v1${path}?${qs}`, {
-    headers: state.key ? { 'X-API-Key': state.key } : {},
+    method: body === null ? 'GET' : 'POST',
+    headers: {'X-API-Key': state.key, ...(body === null ? {} : {'Content-Type': 'application/json'})},
+    ...(body === null ? {} : {body: JSON.stringify(body)}),
   });
-  if (res.status === 401 || res.status === 403) throw new Error('AUTH');
-  if (!res.ok) throw new Error('HTTP ' + res.status);
+  if (!res.ok) throw Object.assign(new Error('HTTP ' + res.status), {status: res.status});
   return res.json();
+}
+
+function apiErrorText(error) {
+  if (error.status === 401) return '请输入有效的 API Key；输入后按 Tab 重新加载。';
+  if (error.status === 403) return '当前 API Key 没有读取权限，需要 report:read。';
+  if (error.status === 429) return '请求过于频繁，请稍后重试。';
+  if (error.status >= 500) return '后端处理失败，请检查服务日志；这不代表没有异常。';
+  if (error.status === 404) return '请求的资源不存在，报告可能尚未生成。';
+  return '请求或页面处理失败，请检查网络连接与服务日志。';
 }
 
 /* ================= 渲染 ================= */
@@ -529,7 +553,7 @@ function render(hist, slow, fb, cost) {
   document.getElementById('kpi-llm-sub').textContent = '每次 LLM 调用';
   countUp(document.getElementById('kpi-cost'), cost.cost_cny || 0, 2);
   document.getElementById('kpi-cost').innerHTML += '<small>元</small>';
-  document.getElementById('kpi-cost-sub').textContent = `in ${(cost.tokens_in/1e6).toFixed(2)}M · out ${(cost.tokens_out/1e6).toFixed(2)}M`;
+  document.getElementById('kpi-cost-sub').textContent = `含反馈提炼 · in ${(cost.tokens_in/1e6).toFixed(2)}M · out ${(cost.tokens_out/1e6).toFixed(2)}M（估算）`;
   countUp(document.getElementById('kpi-backlog'), backlog);
   document.getElementById('kpi-backlog-sub').textContent = 'pending + retrying';
 
@@ -617,9 +641,9 @@ function render(hist, slow, fb, cost) {
     body.innerHTML = qs.map(q => `
       <tr>
         <td><div class="dur"><b>${q.duration_ms.toFixed(1)}ms</b><div class="track2"><div class="fill" style="width:${(q.duration_ms / maxDur * 100).toFixed(0)}%"></div></div></div></td>
-        <td><div class="stmt" title="${q.statement.replace(/"/g, '&quot;')}">${q.statement}</div></td>
-        <td><span class="rid">${q.run_id}</span></td>
-        <td><span class="mono">${q.ts.slice(5, 16)}</span></td>
+        <td><div class="stmt" title="${esc(q.statement)}">${esc(q.statement)}</div></td>
+        <td><span class="rid">${esc(q.run_id)}</span></td>
+        <td><span class="mono">${esc(q.ts.slice(5, 16))}</span></td>
       </tr>`).join('');
   }
 
@@ -627,7 +651,10 @@ function render(hist, slow, fb, cost) {
   const fbScore = fb.avg_rating;
   document.querySelector('.fb-score').textContent = fbScore !== null ? fbScore.toFixed(1) : '–';
   document.querySelector('.fb-stars').textContent = fbScore !== null ? '★'.repeat(Math.round(fbScore)) + '☆'.repeat(5 - Math.round(fbScore)) : '';
-  document.getElementById('fb-meta').textContent = fb.total ? `共 ${fb.total} 条反馈` : '暂无反馈';
+  document.getElementById('fb-meta').textContent = fb.total ? `共 ${fb.total} 条旧版星级反馈` : '暂无星级评分';
+  const verdictNames = {correct: '认为正确', partial: '部分正确', incorrect: '认为不正确', uncertain: '暂不能判断'};
+  document.getElementById('fb-reviews').textContent = `人工审查 ${fb.review_total || 0} 份报告（包括历史版本）：` +
+    Object.entries(fb.review_verdicts || {}).map(([k, v]) => `${verdictNames[k] || k} ${v}`).join('，');
   const histo = document.getElementById('fb-histo');
   if (fb.total) {
     const maxN = Math.max(...Object.values(fb.rating_histogram));
@@ -635,14 +662,14 @@ function render(hist, slow, fb, cost) {
       <div class="fb-row"><span>${r}★</span><div class="bar"><div class="fill" style="width:${(fb.rating_histogram[r] || 0) / maxN * 100}%"></div></div><span>${fb.rating_histogram[r] || 0}</span></div>`).join('');
   } else histo.innerHTML = '';
   const chips = document.getElementById('fb-chips');
-  chips.innerHTML = Object.entries(fb.by_category || {}).map(([k, v]) => `<span class="chip">${k} · ${v}</span>`).join('');
+  chips.innerHTML = Object.entries(fb.by_category || {}).map(([k, v]) => `<span class="chip">${esc(k)} · ${esc(v)}</span>`).join('');
 }
 
 /* ================= 异常列表 ================= */
 function sevBadge(s) {
   const cls = { high: 'sev-high', medium: 'sev-med', low: 'sev-low' }[s] || 'sev-med';
   const label = { high: '严重', medium: '中等', low: '较低' }[s] || s;
-  return `<span class="badge ${cls}">${label}</span>`;
+  return `<span class="badge ${cls}">${esc(label)}</span>`;
 }
 function statusBadge(s) {
   const cls = s === 'open' ? 'st-open' : 'st-closed';
@@ -654,49 +681,245 @@ function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
+let reportLoadId = 0;
 async function openReport(anomalyId, target) {
+  const loadId = ++reportLoadId;
   const mask = document.getElementById('report-mask');
   document.getElementById('rep-title').textContent = `异常 #${anomalyId} · ${target} 诊断报告`;
   document.getElementById('rep-body').innerHTML = '<div class="rep-null"><div class="big">🔄</div>加载报告中…</div>';
   mask.classList.add('show');
   try {
     const rep = await api(`/monitoring/reports/${anomalyId}`);
+    if (loadId !== reportLoadId) return;
     renderReport(rep);
   } catch (e) {
+    if (loadId !== reportLoadId) return;
     document.getElementById('rep-body').innerHTML =
-      `<div class="rep-null"><div class="big">🔍</div>该异常尚未生成诊断报告<br><br>
-        <span class="mono">可能原因：类目级异常暂不自动诊断，或 Worker 未运行/任务失败</span></div>`;
+      `<div class="rep-null"><div class="big">🔍</div>暂时无法读取诊断报告<br><br>
+        <span class="mono">请检查是否已有报告、任务状态、访问权限与网络连接</span></div>`;
   }
 }
 
-function renderReport(rep) {
-  const r = rep.report || {};
-  const facts = Array.isArray(r.facts) ? r.facts : [];
-  const analysis = r.analysis || {};
-  const suggestions = Array.isArray(r.suggestions) ? r.suggestions : [];
-  const body = document.getElementById('rep-body');
-  body.innerHTML = `
+// 纯渲染函数：新旧报告共用，无 DOM/API 副作用，便于离线回归。
+function reportContentHTML(rep) {
+  const obj = v => v !== null && typeof v === 'object' && !Array.isArray(v);
+  const list = v => Array.isArray(v) ? v : [];
+  const text = (v, fallback = '') => typeof v === 'string' && v.trim() ? v :
+    (typeof v === 'number' && Number.isFinite(v) ? String(v) : fallback);
+  rep = obj(rep) ? rep : {};
+  const r = obj(rep.report) ? rep.report : {};
+  const facts = list(r.facts).filter(obj);
+  const analysis = obj(r.analysis) ? r.analysis : {};
+  const checked = r.report_version === 2 && r.report_status === 'quality_checked';
+  const incomplete = r.report_status === 'incomplete';
+  const notice = incomplete ? '诊断未完成：不能据此作最终经营判断，请先查看任务状态。' : checked ?
+    '已通过规则检查；仅支持观察与待验证假设，不表示根因已经证实。' :
+    '历史或未知版本报告：未按当前规则复核，下列原文不代表原因已经证实。';
+  const changes = facts.filter(f => f.section !== 'focus');
+  const focus = facts.filter(f => f.section === 'focus');
+  const factHTML = f => {
+    const ref = obj(f.evidence_ref) ? f.evidence_ref : {};
+    const evidence = text(f.evidence) || [text(ref.call_id), text(ref.path)].filter(Boolean).join(' · ');
+    const value = f.value == null ? '' : text(f.value);
+    const units = {percent: '%', percentage_points: '个百分点', raw: '', count: '次', metric_units: ''};
+    const unit = Object.hasOwn(units, f.unit) ? units[f.unit] : text(f.unit);
+    return `<div class="fact"><div class="point">${esc(text(f.point, '未填写事实说明'))}</div>
+      ${value ? `<div class="evidence">观测值：${esc(value)} ${esc(unit)}</div>` : ''}
+      <details class="evidence"><summary>查看数据来源（技术明细）</summary>${esc(evidence || '旧报告未记录结构化引用')}</details></div>`;
+  };
+  const limits = [...new Set([
+    ...list(analysis.limitations),
+    ...Object.values(obj(analysis.evidence_limits) ? analysis.evidence_limits : {})
+  ].map(v => text(v)).filter(Boolean))];
+  if (!limits.length) limits.push('报告未提供具体限制，不能将缺少说明理解为已排除其他原因。');
+  const hypotheses = list(r.hypotheses).filter(obj);
+  const priorities = {P0: 0, P1: 1, P2: 2};
+  const rank = s => typeof s.priority === 'string' && Object.hasOwn(priorities, s.priority) ? priorities[s.priority] : 3;
+  const suggestions = list(r.suggestions).filter(s => obj(s) || typeof s === 'string')
+    .map(s => typeof s === 'string' ? {action: s} : s).sort((a, b) => rank(a) - rank(b));
+  const summaries = [...new Set([analysis.key_finding, analysis.impact, r.conclusion].map(v => text(v)).filter(Boolean))];
+  return `
     <div class="rep-meta">
-      <span>商品 <b>#${rep.item_id}</b></span>
-      <span>run_id <b class="rid">${rep.run_id}</b></span>
-      <span>模型 <b>${rep.model}</b></span>
-      <span>诊断时间 <b>${rep.created_at}</b></span>
+      <span>商品 <b>#${esc(text(rep.item_id))}</b></span>
+      <details><summary>运行编号</summary><b class="rid">${esc(text(rep.run_id))}</b></details>
+      <span>模型 <b>${esc(text(rep.model))}</b></span>
+      <span>诊断时间 <b>${esc(text(rep.created_at))}</b></span>
     </div>
-    ${facts.length ? `<div class="rep-sec">调查事实（工具取证）</div>` +
-      facts.map(f => {
-        const ref = f.evidence_ref || {};
-        const evidence = f.evidence || [ref.call_id, ref.path].filter(Boolean).join(' · ');
-        return `<div class="fact"><div class="point">${esc(f.point)}</div><div class="evidence">${esc(evidence)}</div></div>`;
-      }).join('') : ''}
-    ${analysis.key_finding ? `<div class="rep-sec">关键发现</div><div class="rep-text">${esc(analysis.key_finding)}</div>` : ''}
-    ${analysis.impact ? `<div class="rep-sec">影响评估</div><div class="rep-text">${esc(analysis.impact)}</div>` : ''}
-    ${r.conclusion ? `<div class="rep-sec">结论</div><div class="rep-text"><b>${esc(r.conclusion)}</b></div>` : ''}
-    ${suggestions.length ? `<div class="rep-sec">建议措施</div>` +
-      suggestions.map((s, i) => {
-        const text = typeof s === 'string' ? s : `${s.action || ''}（${s.owner || '待指定'}；验收：${s.success_metric || '待定义'}）`;
-        return `<div class="sugg"><span class="n">${i + 1}</span><span>${esc(text)}</span></div>`;
-      }).join('') : ''}
+    <div class="rep-notice">${notice}</div>
+    <div class="rep-sec">1. 发生了什么</div>
+    ${summaries.map(s => `<div class="rep-text">${esc(s)}</div>`).join('')}
+    ${changes.length ? changes.map(factHTML).join('') : '<div class="rep-text">尚无可展示的整体指标事实。</div>'}
+    <div class="rep-sec">2. 变化集中在哪里</div>
+    ${focus.length ? focus.map(factHTML).join('') : '<div class="rep-text">尚未定位到具体环节、人群或时段；不表示这些方面都正常。</div>'}
+    <div class="rep-sec">3. 哪些还不能确认</div>
+    <ul class="rep-list">${limits.map(s => `<li>${esc(s)}</li>`).join('')}</ul>
+    ${hypotheses.map(h => `<div class="rep-text">待验证假设：${esc(text(h.statement, '未填写'))}</div>`).join('')}
+    ${hypotheses.length ? '<div class="sugg-detail">假设仅为调查线索，模型自报置信度不是原因成立的概率。</div>' : ''}
+    <div class="rep-sec">4. 下一步查什么</div>
+    ${suggestions.length ? suggestions.map((s, i) => `<div class="sugg"><span class="n">${i + 1}</span><div>
+      <b>${esc(text(s.priority, '优先级待定'))} · ${esc(text(s.action, '行动待补充'))}</b>
+      <div class="sugg-detail">依据：${esc(text(s.rationale, '待补充'))}<br>
+      责任角色：${esc(text(s.owner, '待指定'))}<br>验收：${esc(text(s.success_metric, '待定义'))}</div>
+      </div></div>`).join('') : '<div class="rep-text">尚无可执行建议；先补证据或检查任务失败原因。</div>'}
   `;
+}
+
+function renderReport(rep) {
+  document.getElementById('rep-body').innerHTML = reportContentHTML(rep) + reviewContentHTML(rep);
+  const disable = document.getElementById('review-disable-memory');
+  if (disable) disable.onclick = async () => {
+    if (disable.disabled || !confirm('停止用于后续新诊断？原反馈仍保留，已开始的诊断不受影响。')) return;
+    disable.disabled = true;
+    const loadId = reportLoadId;
+    try {
+      const result = await api(`/monitoring/reports/${encodeURIComponent(rep.run_id)}/memory/disable`, {}, {});
+      if (loadId !== reportLoadId) return;
+      renderReport({...rep, review: result.review});
+      if (!result.markdown_exported) document.getElementById('review-message').textContent = '经验已停用，Markdown 停用记录暂未导出。';
+    } catch (error) {
+      if (loadId !== reportLoadId) return;
+      document.getElementById('review-message').textContent = '未能确认停用结果，请重新打开报告核查；写操作需要 feedback:create 权限。';
+      disable.disabled = false;
+    }
+  };
+  const start = document.getElementById('review-start');
+  if (start) start.onclick = () => {
+    document.getElementById('review-form').hidden = false;
+    start.hidden = true;
+    document.getElementById('review-comment').focus();
+  };
+  const form = document.getElementById('review-form');
+  let draftId = null, draftInput = null;
+  const extract = document.getElementById('review-extract');
+  const feedbackInput = () => ({verdict: document.getElementById('review-verdict').value,
+                              comment: document.getElementById('review-comment').value.trim()});
+  const lessonFields = {correct_lesson:'review-correct', incorrect_lesson:'review-incorrect',
+                        applicability:'review-applicability', evidence_note:'review-evidence'};
+  if (form) {
+    const invalidateDraft = () => {
+      if (draftId) Object.values(lessonFields).forEach(id => {document.getElementById(id).value = '';});
+      draftId = draftInput = null;
+      document.getElementById('review-draft-confirmed').checked = false;
+      document.getElementById('review-draft-check').hidden = true;
+    };
+    document.getElementById('review-comment').oninput = invalidateDraft;
+    document.getElementById('review-verdict').onchange = invalidateDraft;
+    Object.values(lessonFields).forEach(id => {
+      document.getElementById(id).oninput = () => {document.getElementById('review-draft-confirmed').checked = false;};
+    });
+  }
+  if (extract) extract.onclick = async () => {
+    if (extract.disabled || !form.reportValidity()) return;
+    const payload = feedbackInput(), inputSignature = JSON.stringify(payload), loadId = reportLoadId;
+    if (!payload.comment) return;
+    const submit = document.getElementById('review-confirm'), message = document.getElementById('review-message');
+    if (submit.disabled) return;
+    extract.disabled = submit.disabled = true;
+    message.textContent = '正在提炼经验；重复点击会读取同一份草稿，不会重复请求模型。';
+    try {
+      const result = await api(`/monitoring/reports/${encodeURIComponent(rep.run_id)}/review-draft`, {}, payload);
+      if (loadId !== reportLoadId) return;
+      if (JSON.stringify(feedbackInput()) !== inputSignature) {
+        message.textContent = '反馈已修改，未回填旧反馈的草稿。请重新提炼或手工填写。';
+        return;
+      }
+      if (result.status === 'ready') {
+        draftId = result.draft_id; draftInput = inputSignature;
+        Object.entries(lessonFields).forEach(([field,id]) => {document.getElementById(id).value = result.draft[field] || '';});
+        document.getElementById('review-draft-check').hidden = false;
+        document.getElementById('review-draft-confirmed').checked = false;
+        message.textContent = '经验草稿已生成，请核对或修改，再勾选确认。尚未标记已审查，也未启用记忆。';
+      } else {
+        message.textContent = result.status === 'generating' ?
+          '请求仍在处理中或执行曾中断。可再次点击读取原状态；不会自动重放。也可直接手工填写。' :
+          '自动提炼未完成，原反馈仍在；请手工填写或只保存反馈，不会自动重复计费。';
+      }
+    } catch (error) {
+      if (loadId !== reportLoadId) return;
+      message.textContent = error.status === 429 ? '提炼次数达到上限或请求过于频繁，请手工填写或稍后查看。' :
+        error.status === 403 ? '自动提炼需要 feedback:create 权限。' :
+        '暂时无法确认提炼结果；相同反馈再次点击只会读取原请求，也可先手工保存。';
+    } finally {
+      extract.disabled = submit.disabled = false;
+    }
+  };
+  if (form) form.onsubmit = async e => {
+    e.preventDefault();
+    if (!form.reportValidity()) return;
+    const submit = document.getElementById('review-confirm');
+    if (submit.disabled) return;
+    submit.disabled = true;
+    const message = document.getElementById('review-message');
+    const loadId = reportLoadId;
+    const payload = {
+      verdict: document.getElementById('review-verdict').value,
+      comment: document.getElementById('review-comment').value.trim(),
+      correct_lesson: document.getElementById('review-correct').value.trim(),
+      incorrect_lesson: document.getElementById('review-incorrect').value.trim(),
+      evidence_note: document.getElementById('review-evidence').value.trim(),
+      applicability: document.getElementById('review-applicability').value.trim(),
+      draft_id: draftId,
+      draft_confirmed: document.getElementById('review-draft-confirmed').checked,
+      use_as_memory: document.getElementById('review-memory').checked,
+    };
+    if (draftId && (!payload.draft_confirmed || draftInput !== JSON.stringify(feedbackInput()))) {
+      message.textContent = '请确认经验草稿与当前反馈相符；反馈变化后需要重新提炼。';
+      submit.disabled = false;
+      return;
+    }
+    if (!payload.comment || (payload.use_as_memory && !(payload.correct_lesson || payload.incorrect_lesson))) {
+      message.textContent = '请填写反馈；允许后续参考时还需填写至少一条经验。';
+      submit.disabled = false;
+      return;
+    }
+    try {
+      const result = await api(`/monitoring/reports/${encodeURIComponent(rep.run_id)}/review`, {}, payload);
+      if (loadId !== reportLoadId) return;
+      renderReport({...rep, review: result.review});
+      if (!result.markdown_exported) document.getElementById('review-message').textContent =
+        '审查已保存，Markdown 副本暂未导出；请联系维护人员补导出，无需重复审查。';
+      anomState.offset = 0;
+      loadAnomalies(false);
+      loadAll();
+    } catch (error) {
+      if (loadId !== reportLoadId) return;
+      message.textContent = error.status === 403 ? '当前 Key 需要 feedback:create 权限才能提交审查。' :
+        error.status === 409 ? '这份报告已经审查或无法关联异常，请重新打开报告确认。' :
+        error.status === 422 ? '反馈格式不正确，请检查填写内容。' :
+        '提交结果暂时无法确认，请重新打开报告查看；相同反馈重试不会重复记录。';
+      submit.disabled = false;
+    }
+  };
+}
+
+function reviewContentHTML(rep) {
+  const review = rep.review || {};
+  const verdicts = {correct: '认为正确', partial: '部分正确', incorrect: '认为不正确', uncertain: '暂不能判断'};
+  if (review.status === 'reviewed') return `<div class="rep-sec">5. 人工审查 · 已审查</div>
+    <div class="rep-text">判断：${esc(verdicts[review.verdict] || '未填写')} · ${esc(review.reviewed_at)}<br>
+    用户反馈：${esc(review.comment)}<br>可参考经验：${esc(review.correct_lesson || '未填写')}<br>
+    应避免的误判：${esc(review.incorrect_lesson || '未填写')}<br>适用条件：${esc(review.applicability || '未填写')}<br>
+    核查依据：${esc(review.evidence_note || '未填写')}<br>经验来源：${review.draft_id ? '模型提炼，经用户确认或修订' : '用户填写'}<br>
+    后续参考：${review.use_as_memory ? '已允许（仍需本次数据核验）' : '未启用'}</div>
+    ${review.use_as_memory ? '<button class="btn-report" id="review-disable-memory">停止用于后续诊断</button>' : ''}<p id="review-message" role="status"></p>`;
+  return `<div class="rep-sec">5. 人工审查 · 待审查</div>
+    <p class="sugg-detail">审查只标记你已看过这份报告，不表示确认原因，也不会关闭异常。新诊断仍需再次审查。</p>
+    <button class="btn-report" id="review-start">已审查</button>
+    <form id="review-form" hidden class="review-form">
+      <label>这次诊断是否正确？<select id="review-verdict"><option value="uncertain">暂不能判断</option>
+      <option value="correct">认为正确</option><option value="partial">部分正确</option><option value="incorrect">认为不正确</option></select></label>
+      <label>反馈或建议（必填）<textarea id="review-comment" maxlength="2000" required placeholder="哪些判断符合实际？哪里需要修正？"></textarea></label>
+      <p class="sugg-detail">点击下面按钮会把本条反馈、异常信息和报告短结论发送给已配置模型（产生调用费用）。不要填写密钥或个人敏感信息；也可跳过提炼直接保存反馈。</p>
+      <button class="btn-report" id="review-extract" type="button">自动提炼经验并预览（调用模型）</button>
+      <label>可参考经验<textarea id="review-correct" maxlength="600" placeholder="在什么条件下，哪些判断或核查方法有用？"></textarea></label>
+      <label>应避免的误判<textarea id="review-incorrect" maxlength="600" placeholder="什么推断不能仅凭现有数据得出？"></textarea></label>
+      <label>适用条件与限制<textarea id="review-applicability" maxlength="400" placeholder="哪些情形适用？哪些还不能确认？"></textarea></label>
+      <label>核查依据<textarea id="review-evidence" maxlength="600" placeholder="业务记录、核查日期或说明；不要填写个人信息、密码或密钥"></textarea></label>
+      <label><input id="review-memory" type="checkbox">允许把上述经验提供给后续同类诊断的模型参考（仍需重新核验）</label>
+      <label id="review-draft-check" hidden><input id="review-draft-confirmed" type="checkbox">我已核对或修正提炼草稿，确认它忠实表达我的反馈</label>
+      <button class="btn-report" id="review-confirm" type="submit">确认审查并保存反馈</button>
+      <p id="review-message" role="status"></p>
+    </form>`;
 }
 
 document.getElementById('rep-close').onclick = () => document.getElementById('report-mask').classList.remove('show');
@@ -706,7 +929,9 @@ document.getElementById('report-mask').addEventListener('click', e => {
 document.addEventListener('keydown', e => { if (e.key === 'Escape') document.getElementById('report-mask').classList.remove('show'); });
 
 /* ================= 主流程 ================= */
+let monitoringLoadId = 0;
 async function loadAll() {
+  const loadId = ++monitoringLoadId;
   const banner = document.getElementById('banner');
   try {
     const [hist, slow, fb, cost, alerts] = await Promise.all([
@@ -716,21 +941,26 @@ async function loadAll() {
       api('/monitoring/cost', { hours: state.hours }),
       api('/monitoring/alerts'),
     ]);
+    if (loadId !== monitoringLoadId) return;
     render(hist, slow, fb, cost);
     renderAlerts(alerts);
     banner.classList.remove('show');
     document.getElementById('last-update').textContent = `最后更新 ${new Date().toLocaleTimeString('zh-CN')} · ${state.hours}h 窗口 · ${state.bucket}min 粒度`;
     document.getElementById('footer-status').textContent = '监控运行中 · 服务健康';
   } catch (e) {
+    if (loadId !== monitoringLoadId) return;
+    banner.textContent = '⚠️ ' + apiErrorText(e);
     banner.classList.add('show');
-    document.getElementById('footer-status').textContent = e.message === 'AUTH' ? 'API Key 无效或缺失' : '连接失败：' + e.message;
+    document.getElementById('footer-status').textContent = apiErrorText(e);
   }
 }
 
 /* ===== 异常列表（独立加载：筛选/分页手动触发，30s 自动刷新不打断浏览） ===== */
 const anomState = { scope: 'all', diagnosedOnly: false, offset: 0, limit: 50 };
+let anomalyLoadId = 0;
 
 async function loadAnomalies(append = false) {
+  const loadId = ++anomalyLoadId;
   const body = document.getElementById('anomaly-body');
   if (!append) body.innerHTML = '<tr><td colspan="9"><div class="empty">加载中…</div></td></tr>';
   try {
@@ -741,9 +971,18 @@ async function loadAnomalies(append = false) {
       limit: anomState.limit,
       offset: anomState.offset,
     });
+    if (loadId !== anomalyLoadId) return;
     renderAnomalies(data, append);
   } catch (e) {
-    if (!append) body.innerHTML = '<tr><td colspan="9"><div class="empty">加载失败，请检查 API Key</div></td></tr>';
+    if (loadId !== anomalyLoadId) return;
+    if (!append) {
+      body.innerHTML = `<tr><td colspan="9"><div class="empty">${esc(apiErrorText(e))}</div></td></tr>`;
+      document.getElementById('anom-count').textContent = '';
+      document.getElementById('anom-more').style.display = 'none';
+    } else {
+      anomState.offset = Math.max(0, anomState.offset - anomState.limit);
+      document.getElementById('anom-more-info').textContent = apiErrorText(e);
+    }
   }
 }
 
@@ -759,25 +998,28 @@ function renderAnomalies(data, append) {
     return;
   }
   body.insertAdjacentHTML('beforeend', rows.map(a => {
-    const target = a.category_id != null && a.category_id !== 0 ? `类目 #${a.category_id}` : `商品 #${a.item_id}`;
+    const target = a.item_id === 0 ? `类目 #${a.category_id}` : `商品 #${a.item_id}`;
     const drop = a.change_pct <= 0 ? `${a.change_pct}%` : `+${a.change_pct}%`;
     return `
       <tr>
         <td>${sevBadge(a.severity)}</td>
-        <td><b>${target}</b></td>
-        <td>${METRIC_LABEL[a.metric] || a.metric}</td>
-        <td><span class="mono">${a.rule_name}</span></td>
-        <td style="color:var(--err); font-weight:600">${drop}</td>
-        <td><span class="mono">${a.date_start.slice(5)} ~ ${a.date_end.slice(5)}</span></td>
-        <td>${statusBadge(a.status)}</td>
-        <td><span class="mono">${a.detected_at.slice(5)}</span></td>
+        <td><b>${esc(target)}</b></td>
+        <td>${esc(METRIC_LABEL[a.metric] || a.metric)}</td>
+        <td><span class="mono">${esc(a.rule_name)}</span></td>
+        <td style="color:var(--err); font-weight:600">${esc(drop)}</td>
+        <td><span class="mono">${esc(a.date_start.slice(5))} ~ ${esc(a.date_end.slice(5))}</span></td>
+        <td>${statusBadge(a.status)}${a.has_report ? `<br><span class="badge">${a.review_status === 'reviewed' ? '已审查' : '待审查'}</span>` : ''}</td>
+        <td><span class="mono">${esc(a.detected_at.slice(5))}</span></td>
         <td style="text-align:right">
           ${a.has_report
-            ? `<button class="btn-report" onclick="openReport(${a.id}, '${target.replace(/'/g, '')}')">查看报告</button>`
+            ? `<button class="btn-report" data-anomaly-id="${esc(a.id)}" data-target="${esc(target)}">查看报告</button>`
             : `<button class="btn-report" disabled title="该异常尚未自动诊断">未诊断</button>`}
         </td>
       </tr>`;
   }).join(''));
+  body.querySelectorAll('button[data-anomaly-id]').forEach(button => {
+    button.onclick = () => openReport(Number(button.dataset.anomalyId), button.dataset.target);
+  });
   const shown = anomState.offset + rows.length;
   const more = document.getElementById('anom-more');
   if (shown >= total) {
@@ -816,9 +1058,12 @@ document.getElementById('anom-more-btn').onclick = () => {
 
 document.getElementById('api-key').value = state.key;
 document.getElementById('api-key').addEventListener('change', e => {
+  reportLoadId++;
+  document.getElementById('report-mask').classList.remove('show');
   state.key = e.target.value.trim();
-  localStorage.setItem('monitor.key', state.key);
+  anomState.offset = 0;
   loadAll();
+  loadAnomalies(false);
 });
 
 document.querySelectorAll('#window-seg button').forEach(btn => {

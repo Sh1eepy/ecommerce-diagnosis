@@ -18,6 +18,7 @@ from sqlalchemy import (
     String,
     Text,
 )
+from sqlalchemy.dialects import mysql
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -147,6 +148,30 @@ class AgentRun(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
+class AgentCheckpoint(Base):
+    """Agent 每个成功步骤后的可恢复状态；run_id 对应一条最新检查点。"""
+
+    __tablename__ = "agent_checkpoint"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    task_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
+    item_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    window_start: Mapped[date] = mapped_column(Date)
+    window_end: Mapped[date] = mapped_column(Date)
+    anomaly_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    step: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(16), default="active", index=True)
+    state_json: Mapped[str] = mapped_column(
+        Text().with_variant(mysql.LONGTEXT(), "mysql"), default="{}"
+    )
+    result_json: Mapped[str] = mapped_column(
+        Text().with_variant(mysql.LONGTEXT(), "mysql"), default=""
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
 class ToolCallLog(Base):
     """工具调用审计日志。"""
 
@@ -184,6 +209,10 @@ class Task(Base):
     error: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    lease_token: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    deadline_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
@@ -200,4 +229,43 @@ class DiagnosticReport(Base):
     window_end: Mapped[date | None] = mapped_column(Date, nullable=True)
     content_json: Mapped[str] = mapped_column(Text, default="{}")
     model: Mapped[str] = mapped_column(String(64), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class ReportReview(Base):
+    """一份报告版本一次人工审查；不把处理异常和判断报告正确混为一谈。"""
+
+    __tablename__ = "report_review"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    anomaly_id: Mapped[int] = mapped_column(Integer, index=True)
+    metric: Mapped[str] = mapped_column(String(32), index=True)
+    rule_id: Mapped[str] = mapped_column(String(64))
+    scope: Mapped[str] = mapped_column(String(16))
+    report_digest: Mapped[str] = mapped_column(String(64))
+    reviewer: Mapped[str] = mapped_column(String(16))
+    feedback_json: Mapped[str] = mapped_column(Text)
+    anomaly_json: Mapped[str] = mapped_column(Text)
+    use_as_memory: Mapped[bool] = mapped_column(default=False)
+    memory_markdown: Mapped[str] = mapped_column(Text)
+    memory_disabled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class ReviewDraft(Base):
+    """反馈提炼的持久化请求记录；先占位再调用，重复请求不能再次计费。"""
+
+    __tablename__ = "review_draft"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    request_key: Mapped[str] = mapped_column(String(64), unique=True)
+    run_id: Mapped[str] = mapped_column(String(32), index=True)
+    reviewer: Mapped[str] = mapped_column(String(16))
+    report_digest: Mapped[str] = mapped_column(String(64))
+    input_json: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(16), default="generating")
+    draft_json: Mapped[str] = mapped_column(Text, default="{}")
+    model: Mapped[str] = mapped_column(String(64), default="")
+    tokens_in: Mapped[int] = mapped_column(Integer, default=0)
+    tokens_out: Mapped[int] = mapped_column(Integer, default=0)
+    error_code: Mapped[str] = mapped_column(String(40), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)

@@ -1,206 +1,64 @@
 # 电商商品经营异常诊断 Agent
 
-> SQL/Python 负责**发现问题**，Agent 负责**调查问题**，LLM 负责**决策与总结**，Tool 负责**取证**。
-> 数据库负责记忆，Context 负责当前思考。
+SQL/Python 规则发现异常，LLM 选择调查工具，确定性代码控制权限、预算和报告质量。当前适合**有人复核的经营诊断原型**，尚未完成生产验收。
 
-## 架构
+## 当前状态
 
-```
-events.csv ──导入聚合──► daily_item_stat 宽表(UV/曝光/点击/加购/成交/GMV 按天×商品×维度)
-                              │ 规则引擎(不碰LLM, 确定性、可单测)
-                              ▼
-                        anomaly_event 异常事件
-                              │ 生成 Task
-                              ▼
-                     DB 任务队列 + asyncio Worker(并发限制/重试/幂等/优先级/状态)
-                              ▼
-         调查状态: 假设→选择高信息增益工具→证据→更新置信度→报告质量门槛
-                              ▼
-                 Agent Loop (max_steps / timeout / token预算 / 工具白名单)
-                 ├─ MetricTool ─┐ 全部走 agent_ro 只读连接(仅SELECT)
-                 ├─ FunnelTool ─┤ 参数化SQL + 结果上限 + 审计日志(run_id)
-                 ├─ DimensionTool┤
-                 └─ PeerTool ────┘
-                              ▼
-             结构化报告(现象-原因-建议) + 告警(接口预留)
-                ▲
-      FastAPI 层: 触发诊断/查任务/查报告/CSV导入/反馈 ──┐
-      日志: logs/agent_runs·tool_calls·sql_logs (run_id贯穿) │
-      评估: evaluation/   反馈: feedback/agent_feedback/    ──┘
-```
+- 已实现：4 个只读取证工具、API 操作权限、持久化任务队列、分类重试、checkpoint、租约/心跳和旧执行者写保护。
+- MCP：四个读取工具保留实验性 stdio 适配，默认关闭；隔离测试通过，原 Agent 继续直调工具，不要求接入外部客户端。
+- metric 同时检查当前和上一窗口的日记录覆盖；缺记录时不输出可直接解释的环比。peer 保留单窗口横向对照，本轮不增加同行历史比较。
+- 报告按“发生什么、集中在哪、尚未确认、下一步核查”展示，明确限制和行动验收；旧报告标为未按当前规则复核。
+- 上下文去重、请求前预算估计、单次输出限制与低预算收尾已实现；报告正文改用业务语言，技术引用折叠展示。
+- 新增按报告版本的人工审查：可由 LLM 从一段反馈提炼经验草稿，经用户确认或修订后保存 Markdown 并授权同类检索。相同反馈不重复计费，失败可手工保存，经验可停用；审查不等于确认根因或关闭异常。
+- 重复的工具校验、聚合、指标公式和商品/类目检测流程已整理为共用实现。
+- 已做离线回归与少量受控真实调用；数值错引、措辞过强和规则误判仍是重要改进方向。通过规则不等于业务结论已证实，尤其“有加购无成交”不能直接定位为支付问题。
 
-## 技术栈
+重要改动、设计理由和验证边界统一见[变更与验收](docs/变更与验收.md)。本机协作记录、日志、原始数据、备份、真实凭据和用户反馈不随代码发布。
 
-| 层 | 选型 | 理由 |
-|---|---|---|
-| 语言 | Python 3.14 + venv | 环境隔离 |
-| Web | FastAPI + uvicorn | 原生 async、自动 OpenAPI 文档 |
-| DB | MySQL 8.0（本机 3309 端口） | 双账号：`agent_app`(写/DDL) + `agent_ro`(仅 SELECT) |
-| LLM | DeepSeek API（OpenAI 兼容协议） | base_url/model 全配置化；未填 Key 自动用 MockLLM |
-| Agent | 纯 Python 手写 Agent Loop | 不依赖 LangChain，可读可审计 |
+## 阅读入口
 
-## 快速开始
+| 想了解什么 | 文档 |
+|---|---|
+| 从数据到报告、哪些步骤调用 LLM、如何计算 tokens | [项目流程与模型用量](docs/项目流程与模型用量.md) |
+| 配置、数据口径、启动、API 和操作副作用 | [数据与使用说明](docs/数据与使用说明.md) |
+| 为什么这样划分规则、LLM、工具和状态 | [设计说明](docs/设计说明.md) |
+| Worker、重试、租约、恢复、备份迁移 | [Worker 运行与恢复说明](docs/Worker运行与恢复说明.md) |
+| 重要改动、解决的问题、实际验证到哪 | [变更与验收](docs/变更与验收.md) |
+| 上线缺口、验收标准与 MCP 学习路线 | [生产化问题与设计对照](docs/生产化问题与设计对照.md) |
+| MCP 适配原理、可重复演示和接入步骤 | [MCP 接入与学习说明](docs/MCP接入与学习说明.md) |
 
-```bash
-# 1. 环境
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
+## 系统流程
 
-# 2. 配置（复制 .env.example 为 .env，按需修改）
-#    DB_* / LLM_API_KEY / LLM_MODEL
-
-# 3. 初始化数据库与账号（root 执行一次）
-mysql -h 127.0.0.1 -P 3309 -u root -p < scripts\create_users.sql
-# 开启 LOAD DATA LOCAL INFILE（导入提速用，root 执行一次；重启后需重开）
-mysql -h 127.0.0.1 -P 3309 -u root -p -e "SET GLOBAL local_infile = 1"
-
-# 4. 导入 Retailrocket 数据（约 2.76M 事件）
-python scripts\import_retailrocket.py
-
-# 5. 运行异常检测（生成 anomaly_event 并自动创建诊断任务）
-python scripts\run_detection.py
-
-# 6. 启动 API
-uvicorn app.api.main:app --reload --port 8000
-
-# 7. 启动 Worker（消费任务队列，另开终端）
-python scripts\run_worker.py
-
-# 8. 启动调度器（每天 00:00 自动检测+入队诊断，全自动闭环；另开终端）
-python scripts\run_scheduler.py
+```text
+原始数据 → 日指标 → 规则检测 → 异常事件 → Task 队列
+                                           ↓
+                                        Worker
+                                           ↓
+                    LLM 决策 → 只读工具 → 证据/Checkpoint
+                                           ↓
+                      报告质量检查 → 结果/监控/可选告警
 ```
 
-> 💡 **省事版**：第 6~8 步可以用一键脚本代替，见下节「服务管理」。
+实现采用 Python 3.14、FastAPI、SQLAlchemy、MySQL 和手写 Agent Loop。模型使用 DeepSeek 的 OpenAI 兼容接口；开发/测试可用 Mock。SQLite 用于隔离测试，不代替 MySQL 并发验证。
 
-## 服务管理（一键启停）
+## 开发入口
 
-不想开三个终端？项目根目录有两个双击脚本：
-
-| 操作 | 双击 | 效果 |
-|---|---|---|
-| 启动全部 | **`start_all.bat`** | 后台拉起 API + Worker + 调度器（不弹黑窗，日志写 `logs/service/*.log`） |
-| 停止全部 | **`stop_all.bat`** | 按 PID 整树停止三个服务 |
-
-也可以命令行精确控制（`scripts/manage_services.py`）：
-
-```bash
-.venv\Scripts\python.exe scripts\manage_services.py start worker   # 只启动 Worker
-.venv\Scripts\python.exe scripts\manage_services.py stop api       # 只停止 API
-.venv\Scripts\python.exe scripts\manage_services.py status         # 查看三个服务状态
-```
-
-**改代码后重启**：`stop_all.bat` → `start_all.bat`（或对单个服务 stop/start）。
-**查看服务日志**：`logs/service/api.log`、`logs/service/worker.log`、`logs/service/scheduler.log`。
-**日志轮转**：`logs/agent_runs|tool_calls|sql_logs/` 的 JSONL 单文件超 20MB 自动滚动留档（防止 `cli.jsonl` 无限增长）。
-
-## 数据库备份
+依赖见 [requirements.txt](requirements.txt)，配置模板见 [.env.example](.env.example)。示例命令使用 Windows 虚拟环境；Linux/macOS 将解释器替换为 `.venv/bin/python`。已有 `.venv` 可直接复用，从项目根目录执行：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\backup_db.ps1            # 备份，保留最近 7 份
-powershell -ExecutionPolicy Bypass -File scripts\backup_db.ps1 -Keep 14   # 保留 14 份
+.\.venv\Scripts\python.exe -m pytest -p no:cacheprovider -q -W error::DeprecationWarning
 ```
 
-- 备份文件在 `backups/backup_YYYYMMDD_HHMMSS.sql`，自动删除最旧备份
-- 配置从 `.env` 读取；密码走环境变量不进命令行
-- 想每天自动备份：任务计划程序 → 新建任务 → 触发器"每天" → 操作填上面的命令
+测试使用临时 SQLite、模拟响应和空告警配置；执行前确认 `tests/.pytest_runtime` 仍位于本项目 tests 内，测试会清理该目录。只禁用可选 pytest 缓存，未关闭断言或弃用检查。页面脚本回归需要 Node.js；缺少时会明确跳过，不能当成页面已验证。离线测试无需真实数据库和模型网络。
 
-## API 一览（前缀 `/api/v1`，需 `X-API-Key` 头）
+启动、真实诊断、导入、备份迁移见操作文档，**不要将它们与离线测试连成一键操作**。已有数据库不要重新初始化或全量导入；不要默认启动 scheduler 或使用 `start_all.bat`。
 
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| GET | `/healthz` | 健康检查（无需 Key） |
-| POST | `/diagnostics` | 提交诊断（`sync=true` 同步返回；否则进任务队列） |
-| GET | `/tasks/{task_id}` | 查询任务状态与结果 |
-| POST | `/import/daily-stat` | CSV 导入日表（写入口，仅服务层） |
-| POST | `/feedback` | 用户对报告打分/反馈 |
-| GET | `/monitoring` | 监控快照（LLM 延迟/错误率/工具耗时/任务积压） |
-| GET | `/monitoring/history` | 历史趋势（按时间桶分组的时序，`hours`/`bucket` 可调） |
-| GET | `/monitoring/slow-queries` | 慢 SQL TopN（扫 sql_logs，`min_ms`/`limit` 可调） |
-| GET | `/monitoring/cost` | LLM token 成本估算（元，单价 `.env` 可配） |
-| GET | `/monitoring/feedback` | 用户反馈聚合（平均分/类别分布） |
-| GET | `/monitoring/anomalies` | 异常事件列表（严重度/降幅/是否有诊断报告） |
-| GET | `/monitoring/reports/{anomaly_id}` | 按异常查诊断报告（未诊断返回 404） |
-| GET | `/monitoring/alerts` | 告警 Webhook 配置状态（只暴露域名） |
-| GET | `/monitoring/dashboard` | **监控面板页面**（浏览器打开；数据接口仍需 Key） |
-| GET | `/docs` | Swagger 文档 |
+API 正常启动后，可访问[健康检查](http://127.0.0.1:8000/healthz)、[监控面板](http://127.0.0.1:8000/api/v1/monitoring/dashboard)和[OpenAPI JSON](http://127.0.0.1:8000/openapi.json)。业务数据接口需要相应 scope 的 API Key。
 
-```bash
-curl -X POST http://127.0.0.1:8000/api/v1/diagnostics \
-  -H "X-API-Key: dev-key-123" -H "Content-Type: application/json" \
-  -d '{"item_id": 355908, "start_date": "2015-06-01", "end_date": "2015-06-14", "sync": true}'
-```
+## 必须知道的边界
 
-## 权限与安全设计
-
-1. **数据库层**：`agent_ro` 仅 `SELECT`（已实测写操作被拒）；Tool 全部参数化 SQL + 窗口/行数上限。
-2. **Agent 层**：工具白名单（metric/funnel/dimension/peer）、`max_steps`、单步/总 timeout、token 预算、Context 裁剪、证据引用与报告质量门槛。
-3. **API 层**：`X-API-Key` 认证 + 每分钟限流 + 文件类型/大小校验 + **安全响应头**（nosniff/X-Frame-Options/no-store/CSP）。
-4. **写路径隔离**：Agent 无任何写能力；数据导入/任务状态更新只走服务层。
-5. **审计**：每次工具调用写 `tool_call_log`（DB）+ `logs/tool_calls/`（JSONL），全链路 `run_id`。
-6. **密钥管理**：真实密码只存 `.env`（已被 git 忽略）；`scripts/create_users.sql` 仅含占位符；MySQL 账号密码已轮换为随机强密码。
-7. **密钥防泄漏**：`git commit` 前由 **gitleaks** 自动扫描暂存区（见 `hooks/pre-commit`，运行 `scripts/install_hooks.ps1` 安装）；历史中的旧密码已用 git-filter-repo 清除。
-
-## 可观测性（上线排查）
-
-| 问题 | 排查路径 |
-|---|---|
-| Agent 突然变慢 | 拿 run_id → `logs/agent_runs/{run_id}.jsonl` 看每步耗时：LLM 慢（查重试/429/模型负载）或 Tool 慢（查 `logs/sql_logs/` 慢查询加索引） |
-| 用户反馈不准 | 报告带 run_id → 按三分类定位：数据错（Tool 返回 vs 原始 SQL）→ 口径 bug；工具没调（缺关键工具）→ prompt；分析错（证据与结论矛盾）→ LLM/Context 裁剪 |
-| 回归防线 | 修复后跑 `python evaluation/cases_runner.py`，对比 `evaluation_results.json` |
-
-## 目录
-
-```
-app/
-├── config.py            # pydantic-settings 配置
-├── db.py                # 双连接(写/只读) + SQL 日志监听器
-├── models.py            # ORM（daily_item_stat/anomaly_event/task/...）
-├── tracing.py           # run_id 贯穿 + 三类 JSONL 日志
-├── security.py          # API Key + 限流
-├── metrics/             # 指标注册表(口径唯一来源) + 计算
-├── detection/           # 规则引擎 + 检测器（不碰 LLM）
-├── llm/                 # Provider: DeepSeek(OpenAI兼容) / Mock
-├── agent/               # Agent Loop / 调查状态与质量门槛 / 4 个只读 Tool / prompts
-├── tasks/               # DB 队列 + asyncio Worker
-├── monitoring_history.py # 监控扩展：趋势分桶/慢SQL/成本/反馈聚合
-└── api/                 # FastAPI 路由
-scripts/                 # 导入/检测/Worker 脚本
-web/dashboard.html       # 监控面板页面（ECharts，深色主题可换色）
-evaluation/              # 黄金用例 + 离线评估
-feedback/agent_feedback/ # 用户反馈
-logs/                    # agent_runs/tool_calls/sql_logs
-tests/                   # pytest（SQLite 全离线）
-```
-
-## 里程碑
-
-- [x] V1：数据层 + 规则检测 + Agent Loop + 4 Tool（MockLLM 离线跑通）
-- [x] V2：Workflow + 权限（白名单/max_steps/timeout/只读账号/审计）
-- [x] V3：REST API + 文件导入 + DB 任务队列 + Worker
-- [x] V4：并发限制/重试/幂等/优先级（`app/tasks/`）
-- [x] V5：评估（evaluation/）+ 反馈（feedback/）
-- [x] P0-P3 增强：PeerTool 跨商品对比、类目级异常聚合、真实 LLM 评估基线、告警 Webhook、监控指标、导入提速 7 倍
-- [x] P5 监控面板：历史趋势分桶 + 慢查询 TopN + token 成本 + 反馈聚合 + ECharts 深色面板（`/monitoring/dashboard`）
-- [x] P5.1 面板增强：亮/暗底色切换 + 异常事件列表（一键跳诊断报告弹窗）+ 告警配置状态
-- [x] Agent V2：显式“假设—证据—置信度”状态、线索驱动分支调查、四维质量评估、失败报告不再误记成功
-- [ ] 后续：价格按日生效 join、Redis/Celery 队列、多 Worker 副本
-
-## 已知口径（Retailrocket 数据）
-
-- 漏斗为 3 段：`view → addtocart → transaction`（原数据无独立曝光/点击/支付字段）
-- 点击率 = 独立浏览用户/曝光次数（代理）
-- **GMV = 成交笔数 × 商品最新价格（prop=790 提取，V1 近似）；客单价 = GMV/成交笔数**（真实口径）
-- `categoryid`/`available` 未哈希 → 支持类目维度与"下架提示"；其余属性已哈希，系统不解释其含义
-- 接入其他真实电商数据时，改 `app/metrics/definitions.yaml` 口径即可，代码不动
-
-## 当前数据状态（2026-08 导入）
-
-| 表 | 行数 | 说明 |
-|---|---|---|
-| raw_events | 2,756,101 | 原始行为事件（view/addtocart/transaction） |
-| daily_item_stat | 6,812,556 | 日聚合宽表（all/day_type/new_user/category 四维度） |
-| item_price | 417,053 | 商品最新价格（prop=790） |
-| item_category | 417,053 | 商品类目 |
-| item_availability | 1,503,639 | 可用性变更日志 |
-| anomaly_event | 335 | 规则引擎产出的异常事件（近7日环比/连续下降） |
+- `succeeded` 表示调查输出合格，不表示根因已经证实；模型置信度不是校准后的概率。
+- GMV 是近似指标，不能把窗口差额直接称为真实损失；无日记录也不能默认补零。
+- scope 是操作权限，不是用户/店铺隔离；当前读取权限可访问全局报告和监控。
+- 时间和 token 限制不是严格硬取消或账单上限；未保存的步骤及已发出的模型请求可能重复。
+- 导出成功不代表备份可恢复；告警没有事务 outbox，不保证不漏发或恰好一次。

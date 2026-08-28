@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from app.agent.tool import Tool
-from app.agent.tools._common import validate_date, validate_item_id
+from app.agent.tools._common import tool_parameters, parse_item_window
 from app.metrics import compute
 
 
@@ -12,20 +12,10 @@ class FunnelTool(Tool):
         "分析商品 曝光/浏览→加购→成交 漏斗各环节的量级与转化率，"
         "用于定位异常发生在漏斗的哪个环节（浏览环节/加购环节/支付环节）。"
     )
-    parameters = {
-        "type": "object",
-        "properties": {
-            "item_id": {"type": "integer", "description": "商品 ID"},
-            "start_date": {"type": "string", "description": "开始日期 YYYY-MM-DD"},
-            "end_date": {"type": "string", "description": "结束日期 YYYY-MM-DD"},
-        },
-        "required": ["item_id", "start_date", "end_date"],
-    }
+    parameters = tool_parameters()
 
     def run(self, item_id, start_date, end_date):
-        item_id = validate_item_id(item_id)
-        start = validate_date(start_date)
-        end = validate_date(end_date)
+        item_id, start, end = parse_item_window(item_id, start_date, end_date)
 
         f = compute.funnel(item_id, start, end)
         # 统一暴露相邻环节转化率，减少模型对字段名的猜测。

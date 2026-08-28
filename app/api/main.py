@@ -4,16 +4,29 @@
 """
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request
 
 from app.api import diagnostics, files, health, monitoring, monitoring_extra, tasks
 from app.db import init_db
+from app.security import RequestBodyLimitMiddleware
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # 启动成功后才接收请求；初始化失败直接阻止服务启动。
+    init_db()
+    yield
+
 
 app = FastAPI(
     title="电商商品经营异常诊断 Agent",
     description="SQL/Python 发现问题 → Agent 调查问题 → LLM 决策总结 → Tool 取证",
     version="0.1.0",
+    lifespan=lifespan,
 )
+app.add_middleware(RequestBodyLimitMiddleware)
 
 # 监控面板页面：需要加载 CDN 的 ECharts 与内联 JS，CSP 单独放行（其余 API 保持严格）
 _DASHBOARD_CSP = (
@@ -48,8 +61,3 @@ app.include_router(tasks.router, prefix="/api/v1")
 app.include_router(files.router, prefix="/api/v1")
 app.include_router(monitoring.router, prefix="/api/v1")
 app.include_router(monitoring_extra.router, prefix="/api/v1")
-
-
-@app.on_event("startup")
-def _startup() -> None:
-    init_db()

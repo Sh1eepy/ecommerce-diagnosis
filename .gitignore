@@ -6,20 +6,30 @@ __pycache__/
 .pytest_cache/
 # 密钥与本地配置
 .env
+.env.*
+!.env.example
 .env.bak
 .env.*.bak
 API_KEY.txt
 # 数据库备份
 backups/
+# Local Windows permission backup (machine-specific account IDs)
+sandbox-python-acl-before-*.json
 # 原始数据（约1GB，不入库）
 数据/
 # 运行产物
 logs/
 feedback/agent_feedback/
+knowledge/reviews/
 evaluation/evaluation_results.json
 *.log
 dev.db
 tests/.pytest_runtime/
+# 本机协作约定与详细验收记录（保留在本地，不发布）
+/AGENTS.md
+/.codex/
+/.agents/
+/docs/安全加固与学习进度.md
 # IDE
 .idea/
 .vscode/

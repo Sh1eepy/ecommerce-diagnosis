@@ -58,20 +58,14 @@ def collect_history(window_hours: int = 24, bucket_minutes: int = 60) -> dict:
     buckets: dict[int, dict] = {}
     t = first
     while t <= last:
-        buckets[t] = {
-            "agent_runs": {"total": 0, "error": 0, "duration_sum": 0.0,
-                           "llm_calls_sum": 0, "llm_duration_sum": 0.0,
-                           "tokens_in": 0, "tokens_out": 0},
-            "tool_calls": {"total": 0, "error": 0, "latency_sum": 0.0},
-            "tasks": {},
-        }
+        buckets[t] = _empty_bucket()
         t += bucket_seconds
 
     for r in runs:
         b = buckets.setdefault(_bucket_ts(r.created_at, bucket_seconds), _empty_bucket())
         a = b["agent_runs"]
         a["total"] += 1
-        a["error"] += 1 if r.status == "error" else 0
+        a["error"] += 1 if r.status in {"error", "failed"} else 0
         a["duration_sum"] += r.duration_ms or 0
         a["llm_calls_sum"] += r.llm_calls or 0
         a["llm_duration_sum"] += r.llm_duration_ms or 0
@@ -185,9 +179,6 @@ def estimate_cost(tokens_in: int, tokens_out: int) -> float:
 def collect_feedback() -> dict:
     """聚合 feedback/agent_feedback/*.json 的用户反馈（评分/类别分布）。"""
     base = Path(settings.LOG_DIR).parent / "feedback" / "agent_feedback"
-    if not base.exists():
-        return {"total": 0, "avg_rating": None, "by_category": {}, "rating_histogram": {}}
-
     records: list[dict] = []
     for f in base.glob("*.json"):
         try:
@@ -195,9 +186,6 @@ def collect_feedback() -> dict:
             records.extend(data.get("records", []))
         except (json.JSONDecodeError, OSError):
             continue
-
-    if not records:
-        return {"total": 0, "avg_rating": None, "by_category": {}, "rating_histogram": {}}
 
     ratings = [r["rating"] for r in records if isinstance(r.get("rating"), int)]
     by_category: dict[str, int] = {}
@@ -207,11 +195,19 @@ def collect_feedback() -> dict:
     histogram: dict[str, int] = {}
     for v in ratings:
         histogram[str(v)] = histogram.get(str(v), 0) + 1
+    from app.models import ReportReview
+    review_verdicts = {}
+    with read_session() as s:
+        for (feedback_json,) in s.query(ReportReview.feedback_json).all():
+            verdict = json.loads(feedback_json)["verdict"]
+            review_verdicts[verdict] = review_verdicts.get(verdict, 0) + 1
     return {
         "total": len(records),
         "avg_rating": round(sum(ratings) / len(ratings), 2) if ratings else None,
         "by_category": by_category,
         "rating_histogram": histogram,
+        "review_total": sum(review_verdicts.values()),
+        "review_verdicts": review_verdicts,
     }
 
 
@@ -248,6 +244,16 @@ def collect_anomalies(
             AnomalyEvent.detected_at.desc(),
         )
         rows = q.offset(offset).limit(limit).all()
+        from app.models import ReportReview
+        from app.reviews import review_matches
+        latest_reports = {}
+        for rep in (s.query(DiagnosticReport).filter(DiagnosticReport.anomaly_id.in_([r.id for r in rows]))
+                    .order_by(DiagnosticReport.created_at.desc(), DiagnosticReport.id.desc()).all()):
+            latest_reports.setdefault(rep.anomaly_id, rep)
+        current_by_run = {rep.run_id: rep for rep in latest_reports.values()}
+        reviewed_runs = {r.run_id for r in s.query(ReportReview)
+                         .filter(ReportReview.run_id.in_(list(current_by_run))).all()
+                         if review_matches(r, current_by_run[r.run_id])}
 
     out = []
     for r in rows:
@@ -268,6 +274,7 @@ def collect_anomalies(
             "description": r.description,
             "detected_at": r.detected_at.strftime("%Y-%m-%d %H:%M") if r.detected_at else "",
             "has_report": r.id in reported_ids,
+            "review_status": "reviewed" if r.id in latest_reports and latest_reports[r.id].run_id in reviewed_runs else "unreviewed",
         })
     return {"anomalies": out, "total": total}
 
@@ -278,7 +285,7 @@ def get_report_for_anomaly(anomaly_id: int) -> dict | None:
         rep = (
             s.query(DiagnosticReport)
             .filter(DiagnosticReport.anomaly_id == anomaly_id)
-            .order_by(DiagnosticReport.created_at.desc())
+            .order_by(DiagnosticReport.created_at.desc(), DiagnosticReport.id.desc())
             .first()
         )
         if rep is None:
@@ -287,12 +294,17 @@ def get_report_for_anomaly(anomaly_id: int) -> dict | None:
             content = json.loads(rep.content_json) if rep.content_json else {}
         except json.JSONDecodeError:
             content = {}
+        from app.models import ReportReview
+        from app.reviews import review_view
+        review = s.query(ReportReview).filter_by(run_id=rep.run_id).first()
         return {
+            "anomaly_id": anomaly_id,
             "run_id": rep.run_id,
             "model": rep.model,
             "item_id": rep.item_id,
             "created_at": rep.created_at.strftime("%Y-%m-%d %H:%M") if rep.created_at else "",
             "report": content,
+            "review": review_view(review, rep),
         }
 
 

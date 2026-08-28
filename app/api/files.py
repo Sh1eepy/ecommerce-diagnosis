@@ -5,23 +5,24 @@ Agent 永远无法通过该路径写数据。
 """
 from __future__ import annotations
 
+import csv
 import json
-from datetime import date
+from datetime import date, datetime, timezone
 from io import StringIO
 from pathlib import Path
+from typing import Literal
+from uuid import uuid4
 
-import pandas as pd
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from app.config import settings
-from app.db import write_session
-from app.models import DailyItemStat
-from app.security import verify_api_key
+from app.db import read_session, write_session
+from app.models import DailyItemStat, DiagnosticReport
+from app.metrics.registry import DailyStatDimension
+from app.security import require_scope
 
 router = APIRouter(tags=["files"])
-
-MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50MB
 
 CSV_COLUMNS = {
     "item_id", "stat_date", "dimension_type", "dimension",
@@ -29,45 +30,63 @@ CSV_COLUMNS = {
 }
 
 
+class DailyStatRow(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, allow_inf_nan=False)
+
+    item_id: int = Field(gt=0, le=2**63 - 1)
+    stat_date: date
+    dimension_type: DailyStatDimension
+    dimension: str = Field(min_length=1, max_length=32)
+    uv: int = Field(ge=0, le=2**31 - 1)
+    view_count: int = Field(ge=0, le=2**31 - 1)
+    click_count: int = Field(ge=0, le=2**31 - 1)
+    addtocart_count: int = Field(ge=0, le=2**31 - 1)
+    transaction_count: int = Field(ge=0, le=2**31 - 1)
+    gmv: float = Field(ge=0)
+
+    @field_validator("stat_date", mode="before")
+    @classmethod
+    def iso_date(cls, value):
+        if not isinstance(value, str):
+            raise ValueError("stat_date 必须为 YYYY-MM-DD")
+        return date.fromisoformat(value.strip())
+
+
 @router.post("/import/daily-stat")
-def import_daily_stat(file: UploadFile = File(...), _: str = Depends(verify_api_key)) -> dict:
+def import_daily_stat(file: UploadFile = File(...), _: str = Depends(require_scope("data:import"))) -> dict:
     if not (file.filename or "").lower().endswith((".csv", ".txt")):
         raise HTTPException(status_code=400, detail="仅支持 CSV 文件")
-    raw = file.file.read()
-    if len(raw) > MAX_UPLOAD_BYTES:
-        raise HTTPException(status_code=400, detail="文件超过 50MB 上限")
+    raw = file.file.read(settings.MAX_UPLOAD_BYTES + 1)
+    if len(raw) > settings.MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="文件超过大小上限")
     if len(raw) == 0:
         raise HTTPException(status_code=400, detail="文件为空")
 
     try:
-        df = pd.read_csv(StringIO(_decode(raw)))
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(status_code=400, detail=f"CSV 解析失败: {e}") from e
-
-    missing = CSV_COLUMNS - set(df.columns)
-    if missing:
-        raise HTTPException(status_code=400, detail=f"缺少列: {sorted(missing)}")
+        reader = csv.DictReader(StringIO(_decode(raw), newline=""), strict=True)
+        columns = reader.fieldnames or []
+    except (UnicodeError, csv.Error) as e:
+        raise HTTPException(status_code=400, detail="CSV 编码或格式非法") from e
+    if len(columns) != len(CSV_COLUMNS) or set(columns) != CSV_COLUMNS:
+        raise HTTPException(status_code=400, detail="CSV 列必须完整且不重复，不允许额外列")
 
     rows = 0
     with write_session() as s:
-        for _, r in df.iterrows():
-            try:
-                d = date.fromisoformat(str(r["stat_date"]).strip())
-                s.add(DailyItemStat(
-                    item_id=int(r["item_id"]),
-                    stat_date=d,
-                    dimension_type=str(r.get("dimension_type", "all")),
-                    dimension=str(r.get("dimension", "all")),
-                    uv=int(r.get("uv", 0)),
-                    view_count=int(r.get("view_count", 0)),
-                    click_count=int(r.get("click_count", 0)),
-                    addtocart_count=int(r.get("addtocart_count", 0)),
-                    transaction_count=int(r.get("transaction_count", 0)),
-                    gmv=float(r.get("gmv", 0.0)),
-                ))
+        try:
+            for row in reader:
+                if rows >= settings.MAX_UPLOAD_ROWS:
+                    raise HTTPException(status_code=413, detail="CSV 超过行数上限")
+                if None in row:
+                    raise ValueError("CSV 行列数不匹配")
+                validated = DailyStatRow.model_validate(row)
+                s.add(DailyItemStat(**validated.model_dump()))
                 rows += 1
-            except (ValueError, TypeError) as e:
-                raise HTTPException(status_code=400, detail=f"第 {rows + 2} 行数据非法: {e}") from e
+                if rows % 1000 == 0:
+                    s.flush()  # 控制 ORM 内存；整个文件仍在同一个事务内。
+        except (ValidationError, ValueError, csv.Error) as e:
+            raise HTTPException(status_code=400, detail=f"CSV 第 {reader.line_num} 行数据非法") from e
+        if rows == 0:
+            raise HTTPException(status_code=400, detail="CSV 没有数据行")
         s.commit()
     return {"imported_rows": rows}
 
@@ -79,33 +98,35 @@ def _decode(raw: bytes):
             return raw.decode(enc)
         except UnicodeDecodeError:
             continue
-    return raw.decode("utf-8", errors="replace")
+    raise UnicodeError("仅支持 UTF-8 或 GBK")
 
 
 class FeedbackRequest(BaseModel):
-    run_id: str = Field(description="诊断 run_id")
-    rating: int = Field(ge=1, le=5, description="评分 1-5")
-    category: str = Field(default="other", description="问题类别: data/tool/analysis/other")
-    comment: str = Field(default="", description="反馈说明")
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$", description="已有诊断 run_id")
+    rating: int = Field(ge=1, le=5, strict=True, description="评分 1-5")
+    category: Literal["data", "tool", "analysis", "other"] = "other"
+    comment: str = Field(default="", max_length=4000, description="反馈说明")
 
 
 @router.post("/feedback")
-def submit_feedback(payload: FeedbackRequest, _: str = Depends(verify_api_key)) -> dict:
-    """用户对诊断报告的反馈：落盘 feedback/agent_feedback/{run_id}.json。"""
+def submit_feedback(payload: FeedbackRequest, _: str = Depends(require_scope("feedback:create"))) -> dict:
+    """每条反馈写独立文件，文件名由服务端生成，兼容已有 records 聚合格式。"""
+    with read_session() as s:
+        if not s.query(DiagnosticReport.id).filter_by(run_id=payload.run_id).first():
+            raise HTTPException(status_code=404, detail="诊断报告不存在")
     base = Path(settings.LOG_DIR).parent / "feedback" / "agent_feedback"
     base.mkdir(parents=True, exist_ok=True)
-    path = base / f"{payload.run_id}.json"
+    feedback_id = uuid4().hex
+    path = base / f"{feedback_id}.json"
     record = {
         "run_id": payload.run_id,
         "rating": payload.rating,
         "category": payload.category,
         "comment": payload.comment,
-        "ts": json.dumps(str(date.today())),
+        "ts": datetime.now(timezone.utc).isoformat(),
     }
-    if path.exists():
-        data = json.loads(path.read_text(encoding="utf-8"))
-        data.setdefault("records", []).append(record)
-    else:
-        data = {"records": [record]}
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    return {"status": "ok", "path": str(path)}
+    with path.open("x", encoding="utf-8") as f:
+        json.dump({"records": [record]}, f, ensure_ascii=False)
+    return {"status": "ok", "feedback_id": feedback_id}

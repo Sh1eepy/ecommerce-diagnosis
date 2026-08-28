@@ -3,13 +3,12 @@ from __future__ import annotations
 
 from app.agent.tool import Tool
 from app.agent.tools._common import (
-    validate_date,
+    parse_item_window,
+    tool_parameters,
     validate_dimension,
-    validate_item_id,
     validate_metrics,
 )
 from app.metrics import compute
-from app.metrics.registry import KNOWN_METRICS
 
 
 class DimensionTool(Tool):
@@ -19,27 +18,11 @@ class DimensionTool(Tool):
         "当前可用维度: day_type(工作日/周末), new_user(新老用户), category(类目)；"
         "预留: channel(渠道), device(设备), user_type(用户), activity(活动)。"
     )
-    parameters = {
-        "type": "object",
-        "properties": {
-            "item_id": {"type": "integer", "description": "商品 ID"},
-            "dimension": {"type": "string", "description": "维度类型: day_type / new_user / channel / device / user_type / activity"},
-            "start_date": {"type": "string", "description": "开始日期 YYYY-MM-DD"},
-            "end_date": {"type": "string", "description": "结束日期 YYYY-MM-DD"},
-            "metrics": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "可选指标: " + ", ".join(sorted(KNOWN_METRICS)),
-            },
-        },
-        "required": ["item_id", "dimension", "start_date", "end_date"],
-    }
+    parameters = tool_parameters(metrics=True, dimension=True)
 
     def run(self, item_id, dimension, start_date, end_date, metrics=None):
-        item_id = validate_item_id(item_id)
         dimension = validate_dimension(dimension)
-        start = validate_date(start_date)
-        end = validate_date(end_date)
+        item_id, start, end = parse_item_window(item_id, start_date, end_date)
         metric_names = validate_metrics(metrics, ["uv", "addcart_rate", "cvr", "gmv"])
 
         rows = compute.dimension_breakdown(item_id, start, end, dimension, metric_names)

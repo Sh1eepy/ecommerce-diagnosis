@@ -1,79 +1,135 @@
-# 数据库备份脚本：mysqldump 导出 + 保留最近 N 份
-#
-# 用法：
-#   powershell -ExecutionPolicy Bypass -File scripts\backup_db.ps1          # 备份（保留 7 份）
-#   powershell -ExecutionPolicy Bypass -File scripts\backup_db.ps1 -Keep 14 # 保留 14 份
-#
-# 说明：
-#   - 配置从项目根 .env 读取（DB_HOST/DB_PORT/DB_NAME/DB_WRITE_USER/DB_WRITE_PASSWORD）
-#   - 密码通过 MYSQL_PWD 环境变量传递，不出现在命令行（避免被进程列表看到）
-#   - 备份文件在 backups\ 目录，超过 Keep 份自动删除最旧的
-#
-# 想每天自动备份：任务计划程序 → 新建任务 → 触发器"每天" → 操作里填上面这条命令
-
-param([int]$Keep = 7)
+# Publish .sql only after a successful export. Use -NoPrune before migrations.
+param(
+    [ValidateRange(1, 10000)][int]$Keep = 7,
+    [switch]$NoPrune,
+    [string]$DumpExecutable
+)
 
 $ErrorActionPreference = "Stop"
-$root = Split-Path -Parent $PSScriptRoot
-$envFile = Join-Path $root ".env"
-
-if (-not (Test-Path $envFile)) {
-    Write-Host "[ERR] 找不到 .env：$envFile" -ForegroundColor Red
+$projectRoot = Split-Path -Parent $PSScriptRoot
+$envFile = Join-Path $projectRoot ".env"
+if (-not (Test-Path -LiteralPath $envFile -PathType Leaf)) {
+    Write-Host "[ERR] Missing project .env"
     exit 1
 }
-
-# 解析 .env 中的 DB_* 配置（兼容 "KEY=value" 与 "KEY = value"）
 $db = @{}
-Get-Content $envFile | ForEach-Object {
+Get-Content -LiteralPath $envFile -Encoding UTF8 | ForEach-Object {
     if ($_ -match '^\s*DB_([A-Z_]+)\s*=\s*(.*?)\s*$') {
-        $db[$matches[1]] = $matches[2]
+        $key = $matches[1]
+        $value = $matches[2]
+        if ($value.Length -ge 2 -and (
+            ($value.StartsWith('"') -and $value.EndsWith('"')) -or
+            ($value.StartsWith("'") -and $value.EndsWith("'"))
+        )) { $value = $value.Substring(1, $value.Length - 2) }
+        $db[$key] = $value
     }
 }
-
-foreach ($k in @("HOST", "PORT", "NAME", "WRITE_USER", "WRITE_PASSWORD")) {
-    if (-not $db.ContainsKey($k)) {
-        Write-Host "[ERR] .env 缺少 DB_$k 配置" -ForegroundColor Red
+# Environment settings take precedence, as in the application.
+foreach ($key in @("DRIVER", "HOST", "PORT", "NAME", "WRITE_USER", "WRITE_PASSWORD")) {
+    $override = [Environment]::GetEnvironmentVariable("DB_$key")
+    if ($null -ne $override) { $db[$key] = $override }
+}
+if ($db.ContainsKey("DRIVER") -and $db["DRIVER"] -ne "mysql") {
+    Write-Host "[ERR] This script only supports DB_DRIVER=mysql"
+    exit 1
+}
+foreach ($key in @("HOST", "PORT", "NAME", "WRITE_USER", "WRITE_PASSWORD")) {
+    if (-not $db.ContainsKey($key)) {
+        Write-Host "[ERR] Missing DB_$key"
         exit 1
     }
 }
-
-# mysqldump 可执行文件：优先 MySQL 8.0 安装路径（与项目数据库版本匹配），否则用 PATH 中的
-$mysqldump = @(
-    "C:\Program Files\MySQL\MySQL Server 8.0\bin\mysqldump.exe",
-    "C:\Program Files (x86)\MySQL\MySQL Server 8.0\bin\mysqldump.exe"
-) | Where-Object { Test-Path $_ } | Select-Object -First 1
-if (-not $mysqldump) {
-    $g = Get-Command mysqldump -ErrorAction SilentlyContinue
-    if ($g) { $mysqldump = $g.Source }
+if (-not $DumpExecutable) {
+    $DumpExecutable = @(
+        "C:\Program Files\MySQL\MySQL Server 8.0\bin\mysqldump.exe",
+        "C:\Program Files (x86)\MySQL\MySQL Server 8.0\bin\mysqldump.exe"
+    ) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+    if (-not $DumpExecutable) {
+        $command = Get-Command mysqldump -CommandType Application -ErrorAction SilentlyContinue
+        if ($command) { $DumpExecutable = $command.Source }
+    }
 }
-if (-not $mysqldump) {
-    Write-Host "[ERR] 找不到 mysqldump，请确认 MySQL 的 bin 目录已加入 PATH" -ForegroundColor Red
+if (-not $DumpExecutable -or -not (Test-Path -LiteralPath $DumpExecutable -PathType Leaf)) {
+    Write-Host "[ERR] mysqldump not found; check the MySQL client installation"
     exit 1
 }
-
-$backupDir = Join-Path $root "backups"
+$backupDir = [IO.Path]::GetFullPath((Join-Path $projectRoot "backups"))
 New-Item -ItemType Directory -Force -Path $backupDir | Out-Null
-$stamp = Get-Date -Format "yyyyMMdd_HHmmss"
-$outFile = Join-Path $backupDir "backup_$stamp.sql"
-
-Write-Host "备份中: $($db['NAME']) @ $($db['HOST']):$($db['PORT']) -> $outFile"
-$env:MYSQL_PWD = $db["WRITE_PASSWORD"]   # 密码只进环境变量，不进命令行
-try {
-    & $mysqldump -h $db["HOST"] -P $db["PORT"] -u $db["WRITE_USER"] $db["NAME"] | Out-File -FilePath $outFile -Encoding utf8
-    Remove-Item Env:\MYSQL_PWD
-} catch {
-    Remove-Item Env:\MYSQL_PWD -ErrorAction SilentlyContinue
-    Write-Host "[ERR] 备份失败: $($_.Exception.Message)" -ForegroundColor Red
+if ((Get-Item -LiteralPath $backupDir).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+    Write-Host "[ERR] Refusing a linked backup directory"
     exit 1
 }
-
-$size = (Get-Item $outFile).Length
-Write-Host "完成: $([math]::Round($size / 1MB, 2)) MB"
-
-# 清理旧备份：只保留最近 Keep 份
-$old = Get-ChildItem $backupDir -Filter "backup_*.sql" | Sort-Object Name -Descending | Select-Object -Skip $Keep
-foreach ($f in $old) {
-    Remove-Item $f.FullName -Force
-    Write-Host "清理旧备份: $($f.Name)"
+$stamp = Get-Date -Format "yyyyMMdd_HHmmss_fff"
+$suffix = [Guid]::NewGuid().ToString("N").Substring(0, 8)
+$outFile = Join-Path $backupDir ("backup_" + $stamp + "_" + $suffix + ".sql")
+$partialFile = "$outFile.partial"
+$hadMysqlPwd = Test-Path Env:\MYSQL_PWD
+$previousMysqlPwd = $env:MYSQL_PWD
+$succeeded = $false
+$env:MYSQL_PWD = $db["WRITE_PASSWORD"]
+try {
+    Write-Host "Exporting $($db['NAME']) @ $($db['HOST']):$($db['PORT'])"
+    # Let mysqldump write bytes directly; avoid PowerShell text re-encoding.
+    $dumpArgs = @(
+        "--host=$($db['HOST'])", "--port=$($db['PORT'])", "--user=$($db['WRITE_USER'])",
+        "--single-transaction", "--quick", "--no-tablespaces", "--set-gtid-purged=OFF",
+        "--default-character-set=utf8mb4", "--result-file=$partialFile",
+        "--databases", $db["NAME"]
+    )
+    # Do not assign a local LASTEXITCODE: it can shadow the native process result
+    # when an executable is invoked through a child script.
+    # Windows PowerShell can turn native stderr warnings into terminating errors.
+    # Let the process finish, then decide from its exit code, not its stderr stream.
+    $savedErrorAction = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        & $DumpExecutable @dumpArgs 2>$null
+        $dumpExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $savedErrorAction
+    }
+    if ($dumpExitCode -ne 0) { throw "mysqldump returned a nonzero exit code" }
+    if (-not (Test-Path -LiteralPath $partialFile -PathType Leaf) -or
+        (Get-Item -LiteralPath $partialFile).Length -eq 0) {
+        throw "mysqldump did not produce a nonempty file"
+    }
+    foreach ($candidate in @($partialFile, $outFile)) {
+        if ([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($candidate)) -ne $backupDir) {
+            throw "Unsafe backup path"
+        }
+    }
+    Move-Item -LiteralPath $partialFile -Destination $outFile -ErrorAction Stop
+    $succeeded = $true
+} catch {
+    # Do not echo raw client errors, SQL rows, or credentials.
+    Write-Host "[ERR] Backup failed; no valid .sql was published and old backups were not pruned."
+    Write-Host "Check client compatibility, connection and dump privileges. A .partial file may remain."
+} finally {
+    if ($hadMysqlPwd) { $env:MYSQL_PWD = $previousMysqlPwd }
+    else { Remove-Item Env:\MYSQL_PWD -ErrorAction SilentlyContinue }
 }
-Write-Host "当前备份数: $((Get-ChildItem $backupDir -Filter 'backup_*.sql').Count) / 上限 $Keep"
+if (-not $succeeded) { exit 1 }
+
+Write-Host "[OK] Export completed: $outFile ($((Get-Item -LiteralPath $outFile).Length) bytes)"
+Write-Host "This confirms export only; restoration has not been verified."
+if ($NoPrune) {
+    Write-Host "[INFO] NoPrune: all existing backups were kept."
+    exit 0
+}
+# Retain regular, recognized .sql files only; never recurse or prune partial dumps.
+try {
+    $old = Get-ChildItem -LiteralPath $backupDir -File |
+        Where-Object { $_.Name -match '^backup_\d{8}_\d{6}(?:_\d{3}_[0-9a-f]{8})?\.sql$' -and
+            -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) } |
+        Sort-Object Name -Descending | Select-Object -Skip $Keep
+    foreach ($file in $old) {
+        if ([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($file.FullName)) -ne $backupDir) {
+            throw "Unsafe retention path"
+        }
+        if ($file.FullName -ne $outFile) { Remove-Item -LiteralPath $file.FullName -Force }
+    }
+} catch {
+    Write-Host "[WARN] Export succeeded, but retention cleanup failed. The new backup is available."
+    exit 2
+}
+exit 0

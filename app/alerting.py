@@ -23,6 +23,8 @@ def _sign(payload: bytes, secret: str) -> str:
 
 def send_diagnosis_alert(result: dict) -> bool:
     """诊断完成后推送 webhook；未配置 URL 则静默跳过。返回是否实际发送。"""
+    if result.get("status") != "ok":
+        return False  # 证据不足、失败或未完成的报告不得外发
     url = settings.ALERT_WEBHOOK_URL.strip()
     if not url:
         return False
@@ -44,6 +46,8 @@ def send_diagnosis_alert(result: dict) -> bool:
     }
     body = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
     headers = {"Content-Type": "application/json"}
+    # 接收端应按此键去重；可安全重试不代表 HTTP 能保证 exactly-once。
+    headers["X-Idempotency-Key"] = f"diagnosis-alert:{result.get('run_id')}"
     if settings.ALERT_WEBHOOK_SECRET:
         headers["X-Alert-Signature"] = _sign(body, settings.ALERT_WEBHOOK_SECRET)
 

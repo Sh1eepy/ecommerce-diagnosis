@@ -85,4 +85,7 @@ def read_session() -> Session:
 
 
 def init_db() -> None:
+    from app.task_schema import require_task_schema
+
+    require_task_schema(get_write_engine())
     Base.metadata.create_all(get_write_engine())

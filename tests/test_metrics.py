@@ -1,7 +1,11 @@
 """指标计算口径测试。"""
 import pytest
+from datetime import date
+from decimal import Decimal
+import json
 
 from app.metrics.registry import compute_metrics
+from app.metrics.windows import compare_windows, paired_windows
 
 
 def test_cvr_and_rates():
@@ -32,6 +36,38 @@ def test_base_columns_pass_through():
     assert out["transaction_count"] == 1
 
 
+def test_mysql_decimal_counts_remain_json_numbers_and_trigger_small_sample_limit():
+    from app.agent.investigation import InvestigationState
+    from app.agent.quality import evidence_limits
+    rows = [{"date": "2024-03-01", "uv": Decimal(15), "transaction_count": Decimal(1), "gmv": Decimal("12.75")},
+            {"date": "2024-03-02", "uv": Decimal(24), "transaction_count": Decimal(0), "gmv": Decimal(0)}]
+    summary = compare_windows(rows, date(2024, 3, 2), date(2024, 3, 2), ["uv", "gmv", "cvr"])
+    decoded = json.loads(json.dumps(summary))  # 无 default=str 才能证明返回契约兼容
+    assert type(decoded["sample_counts"]["previous"]["transaction_count"]) is int
+    assert decoded["previous"]["gmv"] == 12.75 and decoded["current"]["uv"] == 24
+    investigation = InvestigationState()
+    investigation.observe_tool(1, "metric", {"ok": True, "data": {"summary": decoded}}, None)
+    assert "small_sample" in evidence_limits(investigation.evidence)
+
+
 def test_unknown_metric_raises():
     with pytest.raises(KeyError):
         compute_metrics({"uv": 1}, ["not_a_metric"])
+
+
+def test_window_boundaries_include_leap_day_and_reject_underflow():
+    assert paired_windows(date(2024, 3, 1), date(2024, 3, 2))["previous"] == (date(2024, 2, 28), date(2024, 2, 29))
+    with pytest.raises(ValueError):
+        paired_windows(date.min, date.min)
+
+
+def test_zero_baseline_is_not_infinite_growth_and_missing_denominator_is_unknown():
+    rows = [{"date": "2024-03-01", "uv": 10, "transaction_count": 0},
+            {"date": "2024-03-02", "uv": 10, "transaction_count": 2}]
+    result = compare_windows(rows, date(2024, 3, 2), date(2024, 3, 2), ["cvr", "transaction_count"])
+    assert result["changes"]["cvr"] == {"delta": 20, "delta_unit": "percentage_points",
+                                         "relative_change_pct": None, "status": "zero_baseline"}
+    rows[0]["uv"] = 0
+    result = compare_windows(rows, date(2024, 3, 2), date(2024, 3, 2), ["cvr"])
+    assert result["changes"]["cvr"]["status"] == "undefined_denominator"
+    assert result["changes"]["cvr"]["delta"] is None

@@ -16,6 +16,10 @@ _tmpdir.mkdir(parents=True, exist_ok=True)
 os.environ["DB_DRIVER"] = "sqlite"
 os.environ["SQLITE_PATH"] = str(_tmpdir / "test.db")
 os.environ["LLM_API_KEY"] = ""  # 空 Key → 强制 MockLLM
+os.environ["APP_ENV"] = "test"
+os.environ["API_KEY_SCOPES"] = "{}"
+os.environ["ALERT_WEBHOOK_URL"] = ""
+os.environ["ALERT_WEBHOOK_SECRET"] = ""
 os.environ["LOG_DIR"] = str(_tmpdir / "logs")
 os.environ["API_KEYS"] = "test-key"
 os.environ["TASK_POLL_INTERVAL_SECONDS"] = "0.05"
@@ -26,6 +30,15 @@ import pytest  # noqa: E402
 
 from app.db import get_write_engine, init_db, write_session  # noqa: E402
 from app.models import DailyItemStat, ItemCategory, ItemPrice  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _isolated_rate_limit():
+    from app.security import _requests
+
+    _requests.clear()
+    yield
+    _requests.clear()
 
 
 @pytest.fixture(scope="session", autouse=True)

@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 import json
 from typing import Any
 
+from app.agent.quality import evidence_limits
+
 
 VALID_HYPOTHESIS_STATUS = {"active", "supported", "rejected", "uncertain"}
 
@@ -57,6 +59,9 @@ class InvestigationState:
         status = str(raw.get("status") or "active")
         if status not in VALID_HYPOTHESIS_STATUS:
             status = "active"
+        # 当前观察性工具不能确认/排除原因，恢复旧状态也应用此边界。
+        if status in {"supported", "rejected"}:
+            status = "uncertain"
         current = self.hypotheses.get(hid)
         refs = raw.get("evidence_refs") if isinstance(raw.get("evidence_refs"), list) else []
         valid_refs = [str(ref) for ref in refs if str(ref) in self.evidence]
@@ -103,6 +108,7 @@ class InvestigationState:
 
     def snapshot(self) -> dict:
         return {
+            "evidence_limits": evidence_limits(self.evidence),
             "hypotheses": [h.as_dict() for h in self.hypotheses.values()],
             "successful_evidence": [
                 {"call_id": e["call_id"], "tool": e["tool"], "rows": e["rows"], "summary": e["summary"]}
@@ -110,3 +116,25 @@ class InvestigationState:
             ],
             "failed_calls": list(self.failed_calls),
         }
+
+    def to_dict(self) -> dict:
+        """完整持久化格式；与给模型看的精简 snapshot 分开。"""
+        return {
+            "hypotheses": [h.as_dict() for h in self.hypotheses.values()],
+            "evidence": _json_safe(self.evidence),
+            "failed_calls": _json_safe(self.failed_calls),
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict | None) -> "InvestigationState":
+        state = cls()
+        raw = raw if isinstance(raw, dict) else {}
+        evidence = raw.get("evidence")
+        if isinstance(evidence, dict):
+            state.evidence = _json_safe(evidence)
+        failed = raw.get("failed_calls")
+        if isinstance(failed, list):
+            state.failed_calls = _json_safe(failed)
+        for hypothesis in raw.get("hypotheses") or []:
+            state.update_hypothesis(hypothesis)
+        return state

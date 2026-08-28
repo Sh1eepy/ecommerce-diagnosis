@@ -98,7 +98,8 @@ def test_find_anchor_item():
 
 def test_worker_diagnose_category_task_uses_anchor():
     """类目级任务：Worker 取锚点商品跑诊断（MockLLM 离线），返回 run_id。"""
-    from app.tasks.queue import get_task
+    from app.tasks.queue import get_task, claim_pending
+    from app.task_ownership import Ownership, use_owner
     from app.tasks.worker import _run_diagnose
 
     _clear_anomalies_and_tasks()
@@ -120,6 +121,9 @@ def test_worker_diagnose_category_task_uses_anchor():
         s.refresh(t)
         tid = t.id
 
-    result = _run_diagnose(get_task(tid))
+    claim_pending(1)
+    task = get_task(tid)
+    with use_owner(Ownership(tid, task.lease_token, task.attempts)):
+        result = _run_diagnose(task)
     assert result.get("run_id")
-    assert result.get("status") == "ok"  # MockLLM 离线跑通
+    assert result.get("status") == "ok", (result.get("stop_reason"), result.get("quality"))

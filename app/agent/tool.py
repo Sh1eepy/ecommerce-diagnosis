@@ -11,6 +11,8 @@ import time
 from abc import ABC, abstractmethod
 from typing import Any
 
+from jsonschema import Draft202012Validator, FormatChecker
+
 from app.tracing import log_tool_call
 
 
@@ -28,7 +30,8 @@ class Tool(ABC):
         try:
             result = self.run(**args)
             result.setdefault("ok", True)
-            status, err = "ok", ""
+            status, err = ("ok" if result["ok"] else "error"), ""
+            error_code = None if result["ok"] else "execution_error"
         except Exception as e:  # noqa: BLE001
             result = {
                 "ok": False,
@@ -37,13 +40,14 @@ class Tool(ABC):
                 "data": None,
             }
             status, err = "error", str(e)
+            error_code = "invalid_arguments" if isinstance(e, ValueError) else "execution_error"
         latency = (time.perf_counter() - t0) * 1000.0
         log_tool_call(
             run_id, step, self.name, args,
             result.get("text", ""), result.get("rows", 0),
             round(latency, 2), status,
         )
-        result["_meta"] = {"latency_ms": round(latency, 2), "error": err}
+        result["_meta"] = {"latency_ms": round(latency, 2), "error": err, "error_code": error_code}
         return result
 
 
@@ -81,12 +85,13 @@ class ToolRegistry:
             }
         error = self._validate_args(tool, args)
         if error:
-            return {"ok": False, "text": f"工具参数不合法: {error}", "rows": 0, "data": None}
+            return {"ok": False, "text": f"工具参数不合法: {error}", "rows": 0, "data": None,
+                    "_meta": {"error_code": "invalid_arguments"}}
         return tool.execute(args, run_id=run_id, step=step)
 
     @staticmethod
     def _validate_args(tool: Tool, args: dict) -> str:
-        """执行前做最小 JSON Schema 校验；业务范围仍由各 Tool 校验。"""
+        """共用 Schema 的完整校验；错误不回显输入值，业务关系由 Tool 校验。"""
         if not isinstance(args, dict):
             return "args 必须是对象"
         schema = tool.parameters or {}
@@ -102,4 +107,9 @@ class ToolRegistry:
             expected = types.get((props.get(key) or {}).get("type"))
             if expected and (not isinstance(value, expected) or expected is int and isinstance(value, bool)):
                 return f"参数 {key} 类型错误"
+        error = next(Draft202012Validator(schema, format_checker=FormatChecker()).iter_errors(args), None)
+        if error is not None:
+            # 不使用 error.message，它可能包含用户输入或整个 payload。
+            path = ".".join(str(part) for part in error.absolute_path) or "args"
+            return f"参数 {path} 不符合 {error.validator} 约束"
         return ""
