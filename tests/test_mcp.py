@@ -39,7 +39,7 @@ async def test_protocol_walkthrough(config, mode, monkeypatch):
         assert {t.name for t in listing.tools} == set(EXPORTED_TOOLS)
         print(f"[{mode}] 1. MCP 发现工具：" + ", ".join(t.name for t in listing.tools))
         for tool in listing.tools:
-            assert tool.input_schema == registry.get(tool.name).parameters
+            assert tool.input_schema == registry.input_schema(tool.name)
             assert tool.output_schema == OUTPUT_SCHEMA
             assert tool.annotations.read_only_hint is True
             args = {**ARGS, **({"dimension": "new_user"} if tool.name == "dimension" else {})}
@@ -87,7 +87,8 @@ async def test_scope_revocation_checked_on_each_request(config):
 @pytest.mark.asyncio
 async def test_unknown_and_future_tools_are_not_exported(config):
     registry = default_registry()
-    extra = type("Extra", (), {"name": "write_inventory", "description": "never export", "parameters": {}})()
+    from langchain_core.tools import StructuredTool
+    extra = StructuredTool.from_function(lambda: "not called", name="write_inventory", description="never export")
     registry.register(extra)
     async with Client(create_server(config=config, registry=registry), cache=None) as client:
         assert "write_inventory" not in {t.name for t in (await client.list_tools()).tools}
@@ -146,7 +147,7 @@ async def test_failure_is_not_evidence_and_exception_is_redacted(config, monkeyp
             raise RuntimeError(secret)
         return {"ok": False, "text": secret, "rows": 9, "data": {"private": secret}}
 
-    monkeypatch.setattr(registry.get("metric"), "run", fail)
+    monkeypatch.setattr(registry.get("metric"), "func", fail)
     async with Client(create_server(config=config, registry=registry), cache=None) as client:
         result = await client.call_tool("metric", ARGS)
     assert result.is_error is True
@@ -160,7 +161,7 @@ async def test_failure_is_not_evidence_and_exception_is_redacted(config, monkeyp
 async def test_large_result_rejected_without_partial_evidence(config, monkeypatch):
     config.MCP_MAX_RESULT_BYTES = 4096
     registry = default_registry()
-    monkeypatch.setattr(registry.get("metric"), "run", lambda **kw: {
+    monkeypatch.setattr(registry.get("metric"), "func", lambda **kw: {
         "ok": True, "text": "内容" * 3000, "rows": 1, "data": {"full": "not-partial"},
     })
     async with Client(create_server(config=config, registry=registry), cache=None) as client:
@@ -225,7 +226,7 @@ async def test_timeout_keeps_capacity_until_actual_completion(config, monkeypatc
         finally:
             finished.set()
 
-    monkeypatch.setattr(registry.get("metric"), "run", block)
+    monkeypatch.setattr(registry.get("metric"), "func", block)
     try:
         async with Client(create_server(config=config, registry=registry), cache=None) as client:
             timed_out = await client.call_tool("metric", ARGS)
@@ -279,7 +280,7 @@ async def test_client_cancellation_does_not_release_running_query(config, monkey
         finally:
             finished.set()
 
-    monkeypatch.setattr(registry.get("metric"), "run", block)
+    monkeypatch.setattr(registry.get("metric"), "func", block)
     try:
         async with Client(create_server(config=config, registry=registry), cache=None) as client:
             pending = asyncio.create_task(client.call_tool("metric", ARGS))

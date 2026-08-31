@@ -1,12 +1,47 @@
 """Tool 测试（基于 seeded SQLite 库）。"""
 from datetime import date
 
+import pytest
+
 from app.agent import default_registry
 from app.tracing import set_run_id
 
 
 def _reg():
     return default_registry()
+
+
+@pytest.mark.parametrize("name,extra", [
+    ("metric", {}), ("funnel", {}), ("peer", {}), ("dimension", {"dimension": "new_user"}),
+])
+def test_langchain_tool_preserves_domain_schema_and_result(name, extra):
+    from langchain_core.tools import BaseTool
+    from app.agent.langchain_tools import invoke_tool
+
+    registry = _reg()
+    args = {"item_id": 1, "start_date": "2015-06-01", "end_date": "2015-06-14", **extra}
+    native = registry.get(name)
+    assert isinstance(native, BaseTool)
+    assert native.args_schema == registry.input_schema(name)
+    direct = registry.execute(name, args, run_id="domain-tool", step=1)
+    result = invoke_tool(registry, name, args, run_id="framework-tool", step=1)
+    assert {k: v for k, v in result.items() if k != "_meta"} == {
+        k: v for k, v in direct.items() if k != "_meta"}
+
+
+@pytest.mark.parametrize("change", [
+    {"item_id": True}, {"start_date": "2015/06/01"}, {"start_date": "2015-06-20"},
+    {"run_id": "forged"}, {"step": 99}, {"metrics": ["unknown"]},
+])
+def test_langchain_tool_keeps_invalid_input_error_envelope(change):
+    from app.agent.langchain_tools import invoke_tool
+
+    registry = _reg()
+    args = {"item_id": 1, "start_date": "2015-06-01", "end_date": "2015-06-14", **change}
+    result = invoke_tool(registry, "metric", args, run_id="invalid-framework-tool", step=1)
+    direct = registry.execute("metric", args, run_id="invalid-domain-tool", step=1)
+    assert result["ok"] is False
+    assert result["data"] is None and result["text"] == direct["text"]
 
 
 def test_metric_tool_returns_series():
@@ -130,7 +165,7 @@ def test_metric_reports_days_without_rows_without_filling_zeros(monkeypatch):
     from app.metrics import compute
 
     monkeypatch.setattr(compute, "item_unavailable_periods", lambda *args: [{"date": "2015-06-14"}])
-    res = _reg().get("metric").run(1, "2015-06-13", "2015-06-15")
+    res = _reg().get("metric").invoke({"item_id": 1, "start_date": "2015-06-13", "end_date": "2015-06-15"})
     assert res["data"]["coverage"] == {
         "expected_days": 3, "observed_days": 2,
         "dates_without_rows": ["2015-06-15"], "missing_days_are_zero": False,
@@ -144,14 +179,14 @@ def test_metric_reports_days_without_rows_without_filling_zeros(monkeypatch):
 
 
 def test_metric_with_no_daily_rows_does_not_assert_complete_zero_activity():
-    res = _reg().get("metric").run(999999, "2015-06-01", "2015-06-02")
+    res = _reg().get("metric").invoke({"item_id": 999999, "start_date": "2015-06-01", "end_date": "2015-06-02"})
     assert res["data"]["coverage"]["observed_days"] == 0
     assert res["data"]["coverage"]["dates_without_rows"] == ["2015-06-01", "2015-06-02"]
     assert res["data"]["coverage"]["missing_days_are_zero"] is False
 
 
 def test_metric_both_windows_and_percentage_point_change():
-    result = _reg().get("metric").run(1, "2015-06-08", "2015-06-14", metrics=["cvr", "uv"])
+    result = _reg().get("metric").invoke({"item_id": 1, "start_date": "2015-06-08", "end_date": "2015-06-14", "metrics": ["cvr", "uv"]})
     summary = result["data"]["summary"]
     assert summary["windows"] == {"current": ["2015-06-08", "2015-06-14"],
                                    "previous": ["2015-06-01", "2015-06-07"]}
@@ -162,7 +197,7 @@ def test_metric_both_windows_and_percentage_point_change():
 
 
 def test_metric_current_complete_previous_missing_suppresses_change():
-    result = _reg().get("metric").run(1, "2015-06-01", "2015-06-14")
+    result = _reg().get("metric").invoke({"item_id": 1, "start_date": "2015-06-01", "end_date": "2015-06-14"})
     summary = result["data"]["summary"]
     assert result["data"]["coverage"]["dates_without_rows"] == []
     assert summary["coverage"]["previous"]["observed_days"] == 0
@@ -181,5 +216,5 @@ def test_tool_queries_reuse_aggregates(monkeypatch):
     monkeypatch.setattr(compute, "_rows", record)
     for name, queries in (("metric", 3), ("peer", 4)):
         calls.clear()
-        assert _reg().get(name).run(1, "2015-06-08", "2015-06-14")["ok"]
+        assert _reg().get(name).invoke({"item_id": 1, "start_date": "2015-06-08", "end_date": "2015-06-14"})["ok"]
         assert len(calls) == queries  # metric: 双窗口/价格/状态；peer: 类目/自身/类目汇总/TOP。

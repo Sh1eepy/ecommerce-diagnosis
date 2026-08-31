@@ -354,3 +354,228 @@ def test_agent_resumes_from_last_checkpoint_without_repeating_tool():
     )
     assert cached == result
     assert calls["count"] == 1
+
+
+def _metric_call():
+    return {"type": "tool_call", "tool": "metric", "args": {
+        "item_id": 1, "start_date": "2015-06-01", "end_date": "2015-06-14"}}
+
+
+def test_repeated_candidate_stops_before_another_paid_correction():
+    from app.agent.checkpoint import decode_result, load_checkpoint
+    bad = _valid_report()
+    bad["conclusion"] = "支付环节转化率为0"
+    reordered = dict(reversed(list(copy.deepcopy(bad).items())))
+    reordered["conclusion"] = " 支付环节 转化率为0\n"
+
+    class Recorder(MockLLM):
+        def chat(self, messages, **kwargs):
+            self.last_messages = copy.deepcopy(messages)
+            return super().chat(messages, **kwargs)
+
+    llm = Recorder(plan=[_metric_call(), {"type": "final", "report": bad},
+                         {"type": "final", "report": reordered},
+                         {"type": "final", "report": _valid_report()}])
+    result = Agent(llm=llm).run(1, date(2015, 6, 1), date(2015, 6, 14))
+    assert llm.idx == result["llm_attempts"] == result["steps"] == 3
+    assert result["status"] == "incomplete" and result["stop_reason"] == "insufficient_evidence"
+    assert "重复修正未取得进展" in result["report"]["analysis"]["key_finding"]
+    assert result["report"]["facts"] == []
+    feedback = next(m["content"] for m in llm.last_messages if m["content"].startswith("final 未通过"))
+    assert "conclusion" in feedback and "支付环节转化率为0" in feedback and "没有支付日志" in feedback
+    cp = load_checkpoint(result["run_id"])
+    assert cp.status == "stopped" and decode_result(cp) == result
+
+
+@pytest.mark.parametrize("legacy_correction", [False, True])
+def test_repeat_guard_survives_checkpoint_resume_without_new_schema(legacy_correction):
+    from app.agent.checkpoint import decode_state, load_checkpoint
+    from app.db import write_session
+    from app.models import AgentCheckpoint
+    bad = _valid_report()
+    bad["conclusion"] = "商品下架导致无成交"
+
+    class Crash(MockLLM):
+        def chat(self, messages, **kwargs):
+            if self.idx == 2:
+                raise SystemExit("crash after saved rejection")
+            return super().chat(messages, **kwargs)
+
+    rid = f'repeat-guard-{legacy_correction}'
+    with pytest.raises(SystemExit):
+        Agent(llm=Crash(plan=[_metric_call(), {"type": "final", "report": bad}])).run(
+            1, date(2015, 6, 1), date(2015, 6, 14), run_id=rid)
+    saved = decode_state(load_checkpoint(rid))
+    assert saved["nudges"] == 1 and saved["llm_calls"] == 2
+    if legacy_correction:
+        with write_session() as s:
+            cp = s.query(AgentCheckpoint).filter_by(run_id=rid).one()
+            payload = json.loads(cp.state_json)
+            payload["messages"][-1]["content"] = "final 未通过证据质量门槛，请修正后重试。问题：证据越界"
+            cp.state_json = json.dumps(payload, ensure_ascii=False)
+            s.commit()
+    llm = MockLLM(plan=[{"type": "final", "report": bad}, {"type": "final", "report": _valid_report()}])
+    result = Agent(llm=llm).run(1, date(2015, 6, 1), date(2015, 6, 14), run_id=rid)
+    assert llm.idx == 1 and result["steps"] == result["llm_attempts"] == 3
+    assert result["tool_calls"] == 1 and result["status"] == "incomplete"
+    assert decode_state(load_checkpoint(rid))["tokens_in"] > saved["tokens_in"]
+
+
+def test_new_evidence_allows_reassessment_but_keeps_correction_budget():
+    bad = _valid_report(value=999)
+    llm = MockLLM(plan=[_metric_call(), {"type": "final", "report": bad}, _metric_call(),
+                       {"type": "final", "report": bad}, {"type": "final", "report": _valid_report()}])
+    result = Agent(llm=llm).run(1, date(2015, 6, 1), date(2015, 6, 14))
+    assert result["status"] == "ok" and llm.idx == 5 and result["tool_calls"] == 2
+
+
+MIGRATION_SCENARIOS = ("adaptive", "corrected", "rejected", "invalid", "tool_error", "max_steps", "budget")
+
+
+def _migration_contract(agent_class, scenario, monkeypatch):
+    """固定时钟，记录输入/输出契约；基准由迁移前 Agent 在同一隔离 fixture 生成。"""
+    import hashlib
+    import sys
+    from types import SimpleNamespace
+    from app.agent.checkpoint import decode_state, load_checkpoint
+    from app.config import settings
+
+    monkeypatch.setattr(sys.modules[agent_class.__module__], "time", SimpleNamespace(
+        time=lambda: 1_800_000_000.0, perf_counter=lambda: 0.0))
+    monkeypatch.setattr(settings, "AGENT_MAX_STEPS", 8)
+    monkeypatch.setattr(settings, "AGENT_TOKEN_BUDGET", 20 if scenario == "budget" else 30000)
+    monkeypatch.setattr(settings, "AGENT_TOTAL_TIMEOUT_SECONDS", 300.0)
+    monkeypatch.setattr(settings, "AGENT_STEP_TIMEOUT_SECONDS", 90.0)
+    monkeypatch.setattr(settings, "AGENT_MAX_OUTPUT_TOKENS", 2048)
+    call = {"type": "tool_call", "tool": "metric", "args": {
+        "item_id": 1, "start_date": "2015-06-01", "end_date": "2015-06-14"}}
+    valid = {"type": "final", "report": _valid_report()}
+    bad = copy.deepcopy(valid)
+    bad["report"]["conclusion"] = "类目大盘正常，排除大盘影响。"
+    plans = {
+        "adaptive": None, "corrected": [call, bad, valid], "rejected": [call, bad, bad, bad],
+        "invalid": [{"type": "invalid"}, call,
+                    {"type": "final", "report": _valid_report(call_id="metric#2")}],
+        "tool_error": [{"type": "tool_call", "tool": "unknown", "args": {}}, call,
+                       {"type": "final", "report": _valid_report(call_id="metric#2")}],
+        "max_steps": [call] * 8, "budget": [call, valid],
+    }
+    requests = []
+
+    class Recorder(MockLLM):
+        def chat(self, messages, *, json_mode=True, timeout=None, max_tokens=None):
+            requests.append(copy.deepcopy({"messages": messages, "json_mode": json_mode,
+                                           "timeout": timeout, "max_tokens": max_tokens}))
+            return super().chat(messages, json_mode=json_mode, timeout=timeout, max_tokens=max_tokens)
+
+    result = agent_class(llm=Recorder(plan=plans[scenario])).run(1, date(2015, 6, 1), date(2015, 6, 14))
+    checkpoint = load_checkpoint(result["run_id"])
+
+    def semantic(value):
+        if isinstance(value, dict):
+            return {k: semantic(v) for k, v in value.items()
+                    if k not in {"run_id", "latency_ms", "llm_duration_ms"}}
+        if isinstance(value, list):
+            return [semantic(v) for v in value]
+        return value
+
+    def digest(value):
+        raw = json.dumps(semantic(value), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(raw.encode()).hexdigest()
+
+    return {"status": result["status"], "stop_reason": result["stop_reason"],
+            "steps": result["steps"], "tool_calls": result["tool_calls"],
+            "llm_requests": len(requests), "requests_sha256": digest(requests),
+            "result_sha256": digest(result), "checkpoint_status": checkpoint.status,
+            "checkpoint_sha256": digest(decode_state(checkpoint))}
+
+
+@pytest.mark.parametrize("scenario", MIGRATION_SCENARIOS)
+def test_langgraph_matches_pre_migration_contract(scenario, monkeypatch):
+    from pathlib import Path
+
+    baseline = json.loads((Path(__file__).parent / "fixtures" / "agent_loop_contract.json").read_text(encoding="utf-8"))
+    actual, original = _migration_contract(Agent, scenario, monkeypatch), baseline[scenario]
+    if scenario in {"corrected", "rejected"}:
+        # 后续业务修复有意改变修正提示和重复候选的停止时机；历史基准不可重录。
+        changed = {key for key in actual if actual[key] != original[key]}
+        expected_changes = {"requests_sha256", "checkpoint_sha256"}
+        if scenario == "rejected":
+            expected_changes |= {"steps", "llm_requests", "result_sha256"}
+            assert actual["steps"] == original["steps"] - 1 == 3
+            assert actual["llm_requests"] == original["llm_requests"] - 1 == 3
+        assert changed == expected_changes
+        # 新行为的原句提示、结果与恢复约束由下方针对性测试覆盖。
+    else:
+        assert actual == original
+
+
+def test_langgraph_executes_nodes_and_langchain_interfaces(monkeypatch):
+    from app.agent.graph import InvestigationGraph
+    from app.llm.langchain_adapter import ProviderChatModel
+    from langchain_core.tools import StructuredTool
+
+    visited, models, tools = [], [], []
+    for name in ("prepare", "model", "tools", "review", "checkpoint"):
+        original = getattr(InvestigationGraph, name)
+
+        def traced(self, state, runtime, _name=name, _original=original):
+            visited.append(_name)
+            return _original(self, state, runtime)
+
+        monkeypatch.setattr(InvestigationGraph, name, traced)
+    original_generate = ProviderChatModel._generate
+    original_invoke = StructuredTool.invoke
+
+    def generate(self, *args, **kwargs):
+        models.append(self._llm_type)
+        return original_generate(self, *args, **kwargs)
+
+    def invoke(self, *args, **kwargs):
+        tools.append(self.name)
+        return original_invoke(self, *args, **kwargs)
+
+    monkeypatch.setattr(ProviderChatModel, "_generate", generate)
+    monkeypatch.setattr(StructuredTool, "invoke", invoke)
+    result = Agent(llm=MockLLM()).run(1, date(2015, 6, 1), date(2015, 6, 14))
+    assert result["status"] == "ok"
+    assert visited == ["prepare", "model", "tools", "checkpoint"] * 2 + ["prepare", "model", "review"]
+    assert models == ["ecommerce-provider"] * 3
+    assert tools == ["metric", "funnel"]
+
+
+def test_framework_calls_disable_ambient_remote_tracing(monkeypatch):
+    from langsmith.run_helpers import get_tracing_context
+    from langsmith import tracing_context
+    from app.agent import default_registry
+    from app.llm.langchain_adapter import invoke_chat
+
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    monkeypatch.setenv("LANGCHAIN_TRACING_V2", "true")
+    # 自动创建远程 tracer 就失败，不依赖网络失败来掩盖意外外发。
+    def forbidden_tracer(*args, **kwargs):
+        pytest.fail("不应创建远程 LangSmith tracer")
+
+    monkeypatch.setattr("langchain_core.tracers.langchain.LangChainTracer.__init__", forbidden_tracer)
+    observations = []
+
+    class LocalOnly(MockLLM):
+        def chat(self, messages, **kwargs):
+            observations.append(get_tracing_context()["enabled"])
+            return super().chat(messages, **kwargs)
+
+    registry = default_registry()
+    execute = registry.execute
+
+    def traced_tool(*args, **kwargs):
+        observations.append(get_tracing_context()["enabled"])
+        return execute(*args, **kwargs)
+
+    monkeypatch.setattr(registry, "execute", traced_tool)
+    with tracing_context(enabled=True):
+        result = Agent(llm=LocalOnly(), registry=registry).run(1, date(2015, 6, 1), date(2015, 6, 14))
+        # 反馈路径独立调用适配器，同样需要抑制环境 tracing。
+        invoke_chat(LocalOnly(plan=[{"type": "final"}]), [{"role": "user", "content": "反馈"}])
+        assert get_tracing_context()["enabled"] is True
+    assert result["status"] == "ok"
+    assert observations == [False] * 6

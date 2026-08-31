@@ -84,17 +84,19 @@ def start(name: str = "all") -> None:
             print(f"[{n}] 已在运行 (PID {old_pid})")
             continue
         # 日志追加写，编码 utf-8，行缓冲（便于 tail 观察）
-        logf = open(SVC_DIR / f"{n}.log", "a", encoding="utf-8", buffering=1)
-        proc = subprocess.Popen(
-            SERVICES[n],
-            cwd=str(ROOT),          # 保证 .env / logs 相对路径正确
-            stdout=logf,
-            stderr=subprocess.STDOUT,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),  # 不弹黑窗
-        )
+        with open(SVC_DIR / f"{n}.log", "a", encoding="utf-8", buffering=1) as logf:
+            proc = subprocess.Popen(
+                SERVICES[n],
+                cwd=str(ROOT),          # 保证 .env / logs 相对路径正确
+                stdout=logf,
+                stderr=subprocess.STDOUT,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),  # 不弹黑窗
+            )
+        time.sleep(1.5)  # 给端口冲突等立即退出的故障留出检查时间。
+        if proc.poll() is not None:
+            raise RuntimeError(f"[{n}] 启动进程已退出；请检查 logs/service/{n}.log，未记录为运行中")
         _pid_file(n).write_text(str(proc.pid), encoding="utf-8")
-        print(f"[{n}] 已启动 (PID {proc.pid})，日志 logs/service/{n}.log")
-        time.sleep(1.5)  # 错开启动，避免端口/连接竞争
+        print(f"[{n}] 进程已启动 (PID {proc.pid})，仍需检查健康状态；日志 logs/service/{n}.log")
 
 
 def stop(name: str = "all") -> None:
@@ -105,10 +107,17 @@ def stop(name: str = "all") -> None:
             print(f"[{n}] 未在运行")
             continue
         if _is_running(pid):
-            subprocess.run(
+            result = subprocess.run(
                 ["taskkill", "/PID", str(pid), "/T", "/F"],
                 capture_output=True, timeout=15,
             )
+            if result.returncode != 0:
+                raise RuntimeError(f"[{n}] 停止失败（退出码 {result.returncode}），保留 PID {pid}；请核对权限与进程")
+            deadline = time.monotonic() + 3
+            while _is_running(pid) and time.monotonic() < deadline:
+                time.sleep(0.1)
+            if _is_running(pid):
+                raise RuntimeError(f"[{n}] 停止后进程仍存活，保留 PID {pid}；不能继续按已停止处理")
             print(f"[{n}] 已停止 (PID {pid})")
         else:
             print(f"[{n}] 进程已不存在，清理残留 PID 文件")

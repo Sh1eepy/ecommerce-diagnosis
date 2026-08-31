@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 import json
 from typing import Any
 
+from pydantic import BaseModel, Field
+
 from app.agent.quality import evidence_limits
 
 
@@ -41,13 +43,12 @@ class Hypothesis:
         }
 
 
-class InvestigationState:
+class InvestigationState(BaseModel):
     """由确定性代码维护，避免调查状态只存在于模型的自由文本中。"""
 
-    def __init__(self):
-        self.hypotheses: dict[str, Hypothesis] = {}
-        self.evidence: dict[str, dict] = {}
-        self.failed_calls: list[dict] = []
+    hypotheses: dict[str, Hypothesis] = Field(default_factory=dict)
+    evidence: dict[str, dict] = Field(default_factory=dict)
+    failed_calls: list[dict] = Field(default_factory=list)
 
     def update_hypothesis(self, raw: dict | None) -> str | None:
         if not isinstance(raw, dict):

@@ -126,7 +126,7 @@ class _Bridge:
         self.authorize()
         return types.ListToolsResult(tools=[types.Tool(
             name=name, description=self.registry.get(name).description,
-            input_schema=deepcopy(self.registry.get(name).parameters),
+            input_schema=self.registry.input_schema(name),
             output_schema=deepcopy(OUTPUT_SCHEMA),
             annotations=types.ToolAnnotations(read_only_hint=True, destructive_hint=False,
                                               idempotent_hint=True, open_world_hint=False),
@@ -171,7 +171,7 @@ class _Bridge:
             return self._finish(name, run_id, started, code="rate_limited")
         self.calls.append(started)
         args = params.arguments if params.arguments is not None else {}
-        if self.registry._validate_args(self.registry.get(name), args):
+        if self.registry.validate_args(name, args):
             return self._finish(name, run_id, started, code="invalid_arguments")
         if self.executor is None or len(self.inflight) >= self.config.MCP_MAX_CONCURRENCY:
             return self._finish(name, run_id, started, code="busy")

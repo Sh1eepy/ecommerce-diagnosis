@@ -97,6 +97,51 @@ def test_provider_success_preserves_response_contract(provider):
     assert payload["response_format"] == {"type": "json_object"}
 
 
+def test_langchain_adapter_preserves_wire_messages_usage_and_retry_limit(provider):
+    from app.llm.langchain_adapter import invoke_chat
+
+    messages = [{"role": "system", "content": "原始规则"}, {"role": "user", "content": "任务"},
+                {"role": "assistant", "content": '{"type":"tool_call"}'},
+                {"role": "user", "content": "结构化证据"}]
+    provider.outcomes.extend([(503, {}, None), (200, {}, None)])
+    result = invoke_chat(provider.client, messages, timeout=5, max_tokens=600)
+    assert (result.content, result.tokens_in, result.tokens_out, result.attempts) == ('{"type":"final"}', 10, 3, 2)
+    assert len(provider.requests) == 2
+    for request in provider.requests:
+        payload = json.loads(request.content)
+        assert payload["messages"] == messages
+        assert payload["max_tokens"] == 600
+        assert payload["response_format"] == {"type": "json_object"}
+        assert "tools" not in payload and "stream" not in payload
+
+
+def test_langchain_adapter_preserves_permanent_failure_without_extra_attempt(provider):
+    from app.llm.langchain_adapter import invoke_chat
+
+    provider.outcomes.append((401, {}, None))
+    with pytest.raises(LLMCallError) as exc:
+        invoke_chat(provider.client, [{"role": "user", "content": "task"}])
+    assert exc.value.kind == "permanent" and exc.value.attempts == 1
+    assert len(provider.requests) == 1 and provider.clock.sleeps == []
+
+
+def test_langchain_adapter_does_not_use_global_cache(provider):
+    from langchain_core.caches import InMemoryCache
+    from langchain_core.globals import get_llm_cache, set_llm_cache
+    from app.llm.langchain_adapter import invoke_chat
+
+    old = get_llm_cache()
+    try:
+        set_llm_cache(InMemoryCache())
+        provider.outcomes.extend([(200, {}, None), (200, {}, None)])
+        for _ in range(2):
+            invoke_chat(provider.client, [{"role": "user", "content": "same input"}], json_mode=False)
+        assert len(provider.requests) == 2
+        assert all("response_format" not in json.loads(r.content) for r in provider.requests)
+    finally:
+        set_llm_cache(old)
+
+
 def test_provider_output_limit_is_sent_on_every_retry(provider):
     provider.outcomes.extend([(503, {}, None), (200, {}, None)])
     provider.client.chat([{"role": "user", "content": "JSON"}], max_tokens=600)

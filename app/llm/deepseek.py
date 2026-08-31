@@ -10,8 +10,6 @@ from __future__ import annotations
 import json
 import logging
 import math
-from datetime import timezone
-from email.utils import parsedate_to_datetime
 from random import uniform
 from time import monotonic, sleep, time
 
@@ -19,7 +17,7 @@ from openai import APIStatusError, OpenAI
 
 from app.config import settings
 from app.llm.base import LLMClient, LLMResponse
-from app.llm.errors import LLMCallError, classify_llm_exception
+from app.llm.errors import LLMCallError, classify_llm_exception, retry_after_seconds
 from app.tracing import current_run_id, log_agent_step
 
 logger = logging.getLogger(__name__)
@@ -27,28 +25,7 @@ MAX_RETRY_AFTER_SECONDS = 60.0
 
 
 def _retry_after(error: Exception) -> float | None:
-    if not isinstance(error, APIStatusError):
-        return None
-    headers = error.response.headers
-    for name, divisor in (("retry-after-ms", 1000.0), ("retry-after", 1.0)):
-        raw = headers.get(name)
-        if raw is None:
-            continue
-        try:
-            seconds = float(raw) / divisor
-        except (ValueError, TypeError, OverflowError):
-            if name != "retry-after":
-                continue
-            try:
-                parsed = parsedate_to_datetime(raw)
-                if parsed.tzinfo is None:
-                    parsed = parsed.replace(tzinfo=timezone.utc)
-                seconds = parsed.timestamp() - time()
-            except (ValueError, TypeError, OverflowError, OSError):
-                continue
-        if math.isfinite(seconds) and seconds >= 0:
-            return seconds
-    return None
+    return retry_after_seconds(error, now=time())
 
 
 def _record_attempt(attempt: int, started: float, outcome: str,

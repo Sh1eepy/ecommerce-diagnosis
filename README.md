@@ -109,7 +109,7 @@ API 启动会创建缺失的业务表；已有旧库的字段升级可先用 `sc
 | 部分 | 实现 |
 |---|---|
 | 服务与存储 | FastAPI · SQLAlchemy · MySQL |
-| 调查引擎 | Python Agent Loop · 结构化工具调用 · 证据账本 |
+| 调查引擎 | LangGraph 状态图 · LangChain 模型与工具接口 · 证据账本 |
 | 模型接入 | DeepSeek · OpenAI 兼容客户端 |
 | 任务执行 | 数据库队列 · Worker · Checkpoint · 租约与心跳 |
 | 经验管理 | 报告版本审查 · LLM 草稿 · 人工确认 · 同类检索 |

@@ -12,7 +12,10 @@ def _evidence():
     return {
         "metric#1": {
             "call_id": "metric#1",
-            "data": {"summary": {"current": {"cvr": 4.0}}},
+            "data": {"summary": {"current": {"cvr": 4.0}, "coverage": {
+                "current": {"expected_days": 7, "observed_days": 7, "dates_without_rows": []},
+                "previous": {"expected_days": 7, "observed_days": 7, "dates_without_rows": []},
+            }}},
             "tool": "metric", "rows": 1, "summary": "cvr=4.0",
         }
     }
@@ -21,7 +24,7 @@ def _evidence():
 def _report(value=4.0):
     return {
         "facts": [{
-            "point": "支付转化率为4", "value": value,
+            "point": "购买转化率为4", "value": value,
             "evidence_ref": {"call_id": "metric#1", "path": "summary.current.cvr"},
         }],
         "hypotheses": [{
@@ -226,6 +229,7 @@ def test_overclaim_cannot_hide_outside_conclusion(field):
 
 def test_limits_come_from_evidence_including_legacy_checkpoints():
     evidence = _evidence()
+    del evidence["metric#1"]["data"]["summary"]["coverage"]
     evidence["metric#1"]["data"].update(unavailable_dates=["2015-08-30"], price=91380)
     evidence["metric#1"]["data"]["summary"]["current"]["gmv"] = 0
     evidence["peer#2"] = {"tool": "peer", "data": {"category_total": {"gmv": 782340}}}
@@ -281,3 +285,126 @@ def test_context_truncation_keeps_recent_evidence():
     kept = truncate_context(messages, max_chars=30)
     assert any("LATEST_EVIDENCE" in m["content"] for m in kept)
     assert not any(m["content"] == "old" * 20 for m in kept)
+
+
+@pytest.mark.parametrize("action,rationale,accepted", [
+    ("核查支付环节及商品可售状态", "确认是否存在支付故障或商品下架导致无成交", True),
+    ("请运营检查当前窗口商品是否可售、库存及活动状态", "排除商品下架或库存不足导致无成交", True),
+    ("核查商品可售状态", "是否存在库存不足导致无成交", True),
+    ("核查商品可售状态", "已确认库存不足导致无成交", False),
+    ("核查商品可售状态", "确认是否需要处理，但商品下架导致无成交", False),
+    ("核查商品可售状态", "是否需要处理库存，已证实库存不足导致无成交", False),
+    ("库存不足导致无成交，请补货", "核查库存", False),
+    ("核查支付状态", "支付环节已经失败", False),
+    ("核查支付状态", "是否需要补货但支付故障已确认导致无成交", False),
+    ("核查商品可售状态", "商品下架导致无成交", False),
+])
+def test_pending_checks_do_not_exempt_asserted_facts(action, rationale, accepted):
+    report = _report()
+    report["suggestions"][0].update(action=action, rationale=rationale)
+    result = evaluate_report(report, _evidence())
+    assert result["passed"] is accepted, result["errors"]
+    if not accepted:
+        assert any("suggestions[0]" in e and "原句" in e for e in result["errors"])
+
+
+@pytest.mark.parametrize("claim,accepted", [
+    ("漏斗显示加购2次但成交0次，支付环节转化率为0。", False),
+    ("加购后未支付。", False),
+    ("当前证据仅能定位到支付环节无成交。", False),
+    ("问题集中在支付环节。", False),
+    ("可能支付转化率为0。", False),
+    ("观察到加购2次、成交0次，无法确认支付环节是否异常。", True),
+    ("支付环节可能受阻，仍需支付日志核查。", True),
+    ("支付环节可能存在异常。", True),
+    ("支付环节可能出现故障。", True),
+    ("支付转化率未知。", True),
+    ("没有支付日志，不能确认支付失败。", True),
+    ("缺少支付日志\n支付环节失败。", False),
+    ("缺少支付转化率数据。", True),
+])
+def test_aggregate_evidence_cannot_prove_payment_stage(claim, accepted):
+    report = _report()
+    report["conclusion"] = claim
+    result = evaluate_report(report, _evidence())
+    assert result["passed"] is accepted, result["errors"]
+    if not accepted:
+        assert any("payment_evidence_missing" in e and "conclusion" in e for e in result["errors"])
+
+
+@pytest.mark.parametrize("field", ["fact", "finding", "impact", "limitation", "hypothesis", "action", "rationale", "success_metric"])
+def test_payment_claim_cannot_hide_in_other_report_fields(field):
+    report = _report()
+    obj, key = {
+        "fact": (report["facts"][0], "point"), "finding": (report["analysis"], "key_finding"),
+        "impact": (report["analysis"], "impact"), "limitation": (report["analysis"]["limitations"], 0),
+        "hypothesis": (report["hypotheses"][0], "statement"),
+        **{k: (report["suggestions"][0], k) for k in ("action", "rationale", "success_metric")},
+    }[field]
+    obj[key] = "支付环节转化率为0"
+    assert not evaluate_report(report, _evidence())["passed"]
+
+
+@pytest.mark.parametrize("goal,accepted", [
+    ("获取支付失败或取消订单记录", True),
+    ("取得能支持或否定支付环节异常的核查记录", True),
+    ("取得支付环节日志或商品状态记录，确认或排除支付异常。", True),
+    ("确认或排除支付异常", True),
+    ("验证或者否定付款环节故障", True),
+    ("确认支付异常", False),
+    ("已确认或排除支付异常", False),
+    ("确认或排除支付异常，但已确认支付环节故障", False),
+    ("确认或排除支付异常，支付转化率为0", False),
+    ("确认或排除支付异常，库存不足导致无成交", False),
+    ("取得支付日志，已确认支付环节故障", False),
+    ("取得已证实支付失败的记录", False),
+])
+def test_payment_record_collection_goal_is_not_an_assertion(goal, accepted):
+    report = _report()
+    report["suggestions"][0]["success_metric"] = goal
+    assert evaluate_report(report, _evidence())["passed"] is accepted
+
+
+@pytest.mark.parametrize("location", ["conclusion", "fact", "rationale", "non_checking_action"])
+def test_payment_verification_goal_requires_checking_action_and_goal_field(location):
+    report = _report()
+    goal = "确认或排除支付异常"
+    if location == "conclusion":
+        report["conclusion"] = goal
+    elif location == "fact":
+        report["facts"][0]["point"] = goal
+    elif location == "rationale":
+        report["suggestions"][0]["rationale"] = goal
+    else:
+        report["suggestions"][0].update(action="增加推广投入", success_metric=goal)
+    result = evaluate_report(report, _evidence())
+    assert not result["passed"]
+    assert any("payment_evidence_missing" in error for error in result["errors"])
+
+
+@pytest.mark.parametrize("claim", [
+    "当前窗口UV 26，上一窗口UV 20，访客数略有增加。",
+    "CVR从10%降至0%。", "当前窗口GMV为0，较上一窗口估算差额约117.6万。",
+    "流量正常。", "可能访客数增加。",
+])
+@pytest.mark.parametrize("coverage", ["full", "missing", "legacy"])
+def test_comparison_requires_both_windows_even_when_disclaimer_exists(claim, coverage):
+    report, evidence = _report(), _evidence()
+    report["analysis"]["impact"] = claim
+    report["analysis"]["limitations"].append("覆盖不完整时环比解释受限")
+    summary = evidence["metric#1"]["data"]["summary"]
+    if coverage == "missing":
+        summary["coverage"]["previous"].update(observed_days=6, dates_without_rows=["2015-09-06"])
+    elif coverage == "legacy":
+        del summary["coverage"]
+    result = evaluate_report(report, evidence)
+    assert result["passed"] is (coverage == "full"), result["errors"]
+    if coverage != "full":
+        assert any("daily_coverage_unverified" in e and "analysis.impact" in e for e in result["errors"])
+
+
+def test_missing_coverage_allows_recorded_levels_and_explicit_unknowns():
+    report, evidence = _report(), _evidence()
+    del evidence["metric#1"]["data"]["summary"]["coverage"]
+    report["conclusion"] = "当前窗口记录成交0笔，上一窗口记录2笔。不能判断访客增加，无法计算GMV差额。"
+    assert evaluate_report(report, evidence)["passed"]

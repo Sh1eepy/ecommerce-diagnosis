@@ -48,15 +48,28 @@ def evidence_limits(evidence: dict[str, dict]) -> dict[str, str]:
     return limits
 
 
-def _overclaim_errors(report: dict) -> list[str]:
-    """有限的中英文过度断言检查；不是通用自然语言蕴含或因果证明器。"""
+def _report_texts(report: dict):
+    """保留字段语境；建议 action 不能给另一句确定性断言豁免。"""
     analysis = report.get("analysis")
     analysis = analysis if isinstance(analysis, dict) else {}
-    texts = [analysis.get("key_finding"), analysis.get("impact"), report.get("conclusion")]
-    for field, key in (("facts", "point"), ("hypotheses", "statement"), ("suggestions", "rationale")):
+    for key in ("key_finding", "impact"):
+        yield f"analysis.{key}", analysis.get(key), ""
+    if isinstance(analysis.get("limitations"), list):
+        for i, value in enumerate(analysis["limitations"]):
+            yield f"analysis.limitations[{i}]", value, ""
+    yield "conclusion", report.get("conclusion"), ""
+    for field, keys in (("facts", ("point",)), ("hypotheses", ("statement",)),
+                        ("suggestions", ("action", "rationale", "success_metric"))):
         entries = report.get(field)
         if isinstance(entries, list):
-            texts.extend(x.get(key) for x in entries if isinstance(x, dict))
+            for i, entry in enumerate(entries):
+                if isinstance(entry, dict):
+                    for key in keys:
+                        yield f"{field}[{i}].{key}", entry.get(key), entry.get("action", "")
+
+
+def _overclaim_errors(report: dict, evidence: dict | None = None) -> list[str]:
+    """有限的中英文过度断言检查；不是通用自然语言蕴含或因果证明器。"""
     patterns = {
         "significance_unverified": (r"(?:显著下降|显著下跌|显著低于|显著恶化|统计显著)",),
         "category_baseline_missing": (
@@ -70,34 +83,91 @@ def _overclaim_errors(report: dict) -> list[str]:
             r"(?:原因|根因|所致|导致).{0,16}(?:下架|不可售|不可用|库存)",
             r"(?:确认|证实|确定|表明).{0,16}(?:整个窗口|全窗口|全程|窗口内).{0,8}(?:不可售|下架)",
             r"(?:unavailable|delisted|out.of.stock).{0,25}(?:caused|causes|resulted in)",
+            r"(?:已(?:经)?(?:确认|证实)|事实表明).{0,12}(?:导致|造成|所致|根因|直接原因)",
         ),
         "gmv_proxy_not_loss": (
             r"(?:gmv|销售额|成交额).{0,10}(?:损失|损害)",
             r"损失.{0,6}\d.{0,8}(?:元|万|亿)",
             r"(?:gmv|revenue).{0,12}(?:loss|lost)",
         ),
+        # 当前注册工具只有浏览/加购/成交聚合值，没有支付事件或用户会话链路。
+        "payment_evidence_missing": (
+            r"(?:支付|付款)(?:环节|阶段|链路|流程)?(?:的)?(?:转化率|成功率|失败率|次数|笔数)",
+            r"(?:无|未|没有)(?:支付|付款)(?!日志|记录|数据|信息|证据)",
+            r"(?:支付|付款).{0,12}(?:受阻|异常|故障|失败|无成交|没有成交)",
+            r"(?:定位|集中|问题出在|问题在|卡在|瓶颈在).{0,8}(?:支付|付款)",
+        ),
     }
+    fixes = {
+        "payment_evidence_missing": "改为浏览/加购/成交的聚合观察；没有支付日志，支付故障只能作为待核查假设，不能给出支付率或确认支付定位",
+        "daily_coverage_unverified": "只列前后窗口各自已记录的数值并说明缺记录；删除增减、正常、环比及自行计算的差额，不把缺行补零",
+        "causal_unverified": "事实中删除已确认因果；核查建议写成“请核查是否存在…”，未知原因保留待验证",
+    }
+    coverage_patterns = (
+        r"(?:访客(?:数)?|流量|uv|浏览(?:量|数)?|成交(?:笔数|量)|cvr|转化率|gmv|销售额).{0,24}(?:增加|增长|上涨|上升|减少|下降|下跌|降至|升至|提高|降低|正常|稳定|未降|差额)",
+        r"(?:较|相比|相较|比)(?:上期|上一窗口|上个窗口|前期).{0,16}(?:增|减|升|降)",
+        r"(?:差额|环比).{0,8}\d",
+    )
+    limits = evidence_limits(evidence) if evidence is not None else {}
     errors = set()
-    for value in texts:
+    for path, value, action in _report_texts(report):
         if not isinstance(value, str):
             continue
+        active_patterns = dict(patterns)
+        field_limits = limits
+        # 单条事实按其引用取覆盖边界，避免别的工具缺覆盖污染完整的事实证据。
+        if evidence is not None and path.startswith("facts["):
+            fact = report["facts"][int(path.split("[")[1].split("]")[0])]
+            ref = fact.get("evidence_ref")
+            call_id = ref.get("call_id") if isinstance(ref, dict) else None
+            if isinstance(call_id, str) and call_id in evidence:
+                field_limits = evidence_limits({call_id: evidence[call_id]})
+        if "daily_coverage_unverified" in field_limits:
+            active_patterns["daily_coverage_unverified"] = coverage_patterns
         # 逐分句判断，避免在别处加一句“可能”就绕过确定性结论。
-        for clause in re.split(r"[，,。；;！!？?\n]", value.lower()):
-            for code, expressions in patterns.items():
+        # 仅规整横向空白，保留换行这一语义边界，避免前句否定修饰后句断言。
+        text = re.sub(r"(?<=[\u4e00-\u9fff])[ \t\u3000]+(?=[\u4e00-\u9fff])", "", value.lower())
+        for clause in re.split(r"[，,。；;！!？?\n]|但是|然而|不过|但", text):
+            for code, expressions in active_patterns.items():
                 for expression in expressions:
                     for match in re.finditer(expression, clause):
                         prefix = clause[:match.start()]
-                        negative = re.search(r"(?:不能|无法|尚未|不足以|未能|不应|未确认|未证实|并非|不是|不等于|cannot|not|unconfirmed).{0,12}$", prefix)
+                        negative = re.search(r"(?:不能|无法|尚未|不足以|未能|不应|未确认|未证实|并非|不是|不等于|不得|不可|缺少|缺乏|尚无|cannot|not|unconfirmed).{0,12}$", prefix)
+                        negative = negative or re.match(r"(?:仍|尚|暂)?(?:未知|不明|未验证|无法计算|不可计算|尚不清楚)", clause[match.end():])
                         tentative = re.search(r"(?:可能|或许|疑似|待验证|待核实|是否|may|might|possibly).{0,8}$", prefix)
+                        # “确认是否存在支付故障或商品下架导致…”的问句语境不能用8字截断。
+                        question = re.search(r"是否[^，。；!?！？\n]{0,80}$", prefix)
+                        checking_action = isinstance(action, str) and re.match(
+                            r"^(?:请.{0,8}?)?(?:核查|核实|排查|检查|核对|调查|查明|确认是否|验证是否)", action)
+                        pending_suggestion = path.startswith("suggestions[") and checking_action and re.match(
+                            r"^(?:请.{0,8}?)?(?:排除|核查|核实|排查|检查|核对|判断是否|确认是否|验证是否)", clause.strip())
+                        if code == "payment_evidence_missing" and path.endswith(".success_metric") and checking_action:
+                            # 验收目标“获取支付失败记录”不是声称已经拿到记录或确认了故障。
+                            pending_suggestion = pending_suggestion or re.match(
+                                r"^(?:获取|取得|收集|查阅).{0,60}(?:日志|记录|证据|反馈)", clause.strip())
+                            # “确认或排除”保留两种核查结果，只在核查建议的验收目标中适用。
+                            # 下方仍逐句检查“已确认”等断言，不能用目标为后续结论开脱。
+                            pending_suggestion = pending_suggestion or re.match(
+                                r"^(?:确认|证实|验证)(?:或|或者)(?:排除|否定)(?:支付|付款)", clause.strip())
+                        asserted = re.search(r"已(?:经)?(?:确认|证实|确定|排除)|事实表明|必然|肯定|就是", clause)
+                        if asserted:
+                            tentative = question = pending_suggestion = False
                         # “库存变化可能导致”中的限定词在匹配内部，且必须紧贴
                         # 因果谓词；别处的“可能”仍不能替确定性断言开脱。
-                        if code == "causal_unverified":
+                        if code in {"causal_unverified", "payment_evidence_missing"} and not asserted:
                             tentative = tentative or re.search(
-                                r"(?:可能|或许|疑似|是否)(?:是|为)?(?:导致|造成|所致|根因|直接原因)$",
+                                r"(?:可能|或许|疑似|是否)(?:是|为|存在|出现)?(?:导致|造成|所致|根因|直接原因|受阻|异常|故障|失败)$",
                                 match.group(),
                             )
-                        if not negative and not (tentative and code != "gmv_proxy_not_loss"):
-                            errors.add(f"证据越界[{code}]：请改为可回查事实或待验证假设，不得直接确认趋势、因果或实际损失")
+                        qualified = tentative or question or pending_suggestion
+                        # 缺覆盖不能靠“可能”计算环比；聚合工具不能支持猜测支付率。
+                        if code in {"gmv_proxy_not_loss", "daily_coverage_unverified"}:
+                            qualified = False
+                        if code == "payment_evidence_missing" and re.search(r"转化率|成功率|失败率|次数|笔数", match.group()):
+                            qualified = question or pending_suggestion
+                        if not negative and not qualified:
+                            fix = fixes.get(code, "改为可回查事实或待验证假设，不得直接确认趋势、因果或实际损失")
+                            errors.add(f"证据越界[{code}] {path}：原句“{clause.strip()[:100]}”；{fix}")
     return sorted(errors)
 
 
@@ -231,7 +301,7 @@ def evaluate_report(report: dict, evidence: dict[str, dict]) -> dict:
     uncertainty_ok = isinstance(limitations, list) and bool(limitations) and all(isinstance(x, str) and x.strip() for x in limitations)
     if not uncertainty_ok:
         errors.append("analysis.limitations 必须明确列出尚未确认的部分，不能是空列表或字符串")
-    errors.extend(_overclaim_errors(report))
+    errors.extend(_overclaim_errors(report, evidence))
 
     # 防止结构化事实正确、自然语言总结却自相矛盾（如事实 UV=13，结论称 UV 全部归零）。
     narrative = "\n".join([

@@ -1,4 +1,4 @@
-"""Agent Loop：LLM 决策 → Tool 执行 → 结果回填 → 循环直到 final。
+"""Agent 兼容入口：恢复与落盘契约 + LangGraph 调查图。
 
 安全上限（防止失控）：
 - max_steps：最大循环轮数
@@ -13,6 +13,8 @@ import json
 import time
 from datetime import date, timezone
 
+from langchain_core.language_models.chat_models import BaseChatModel
+
 from app.agent import default_registry
 from app.agent.checkpoint import (
     decode_result,
@@ -22,20 +24,18 @@ from app.agent.checkpoint import (
     terminal_status,
 )
 from app.agent.context import (
-    append_investigation_state,
-    append_tool_result,
     build_initial_messages,
-    compact_context,
 )
 from app.agent.investigation import InvestigationState
-from app.agent.quality import evaluate_report
 from app.agent.state import FailureInfo, RunBudget
 from app.agent.tool import ToolRegistry
 from app.agent.workflow import Workflow
+from app.agent.graph import InvestigationContext, InvestigationGraph, LoopState
 from app.alerting import send_diagnosis_alert
 from app.config import settings
 from app.db import write_session
 from app.llm import get_llm, LLMClient
+from app.llm.langchain_adapter import as_llm_client
 from app.models import AgentRun, DiagnosticReport, ToolCallLog
 from app.tracing import log_agent_step, new_run_id, set_run_id
 from app.task_ownership import check_ownership, lock_owned_task, task_deadline
@@ -94,9 +94,10 @@ def _partial_report(reason: str = "") -> dict:
 
 
 class Agent:
-    def __init__(self, llm: LLMClient | None = None, registry: ToolRegistry | None = None):
-        self.llm = llm or get_llm()
+    def __init__(self, llm: LLMClient | BaseChatModel | None = None, registry: ToolRegistry | None = None):
+        self.llm = as_llm_client(llm if llm is not None else get_llm())
         self.registry = registry or default_registry()
+        self.graph = InvestigationGraph()
 
     def run(
         self,
@@ -201,8 +202,8 @@ class Agent:
         def remaining_seconds() -> float:
             return min(budget.deadline_at - time.time(), budget.seconds_limit - elapsed_ms() / 1000)
 
-        def checkpoint_state(resume_at: int) -> dict:
-            return {
+        def checkpoint_state(resume_at: int, loop: LoopState | None = None) -> dict:
+            payload = {
                 "schema_version": 1,
                 "next_step": resume_at,
                 "messages": messages,
@@ -222,6 +223,14 @@ class Agent:
                 "retry_not_before": retry_not_before,
                 "memory_refs": memory_refs,
             }
+
+            if loop is not None:
+                # 兼容原 schema_version=1；图内决策/输出额度不是跨步骤恢复状态。
+                for name in payload.keys() & vars(loop).keys():
+                    payload[name] = getattr(loop, name)
+                payload["investigation"] = loop.investigation.to_dict()
+                payload["workflow"] = loop.workflow.to_dict()
+            return payload
 
         if checkpoint is not None and checkpoint.status == "waiting_retry" and remaining_seconds() > 0:
             waiting_result = json.loads(checkpoint.result_json)
@@ -243,176 +252,66 @@ class Agent:
                 anomaly_id=anomaly_id, step=0, state=checkpoint_state(1),
             )
 
-        for step in range(next_step, budget.max_steps + 1):
-            check_ownership(task_id, run_id)
-            steps = step
-            resume_at = step
-            if remaining_seconds() <= 0:
-                stop_reason = STOP_TOTAL_TIMEOUT
-                break
-            if tokens_in + tokens_out >= budget.token_limit:
-                stop_reason = STOP_TOKEN_BUDGET
-                break
-
-            messages = compact_context(messages, investigation) if investigation.evidence else messages
-            remaining_tokens = budget.token_limit - tokens_in - tokens_out
-            estimated_input = self.llm.estimate_input_tokens(messages)
-            # 给最终报告及一次纠错留空间。低预算时停止扩展调查，不降低报告门槛。
-            final_only = bool(investigation.evidence) and (
-                remaining_tokens < 3 * (estimated_input + self.llm.output_token_reserve(settings.AGENT_MAX_OUTPUT_TOKENS))
-            )
-            if final_only:
-                messages.append({"role": "user", "content":
-                    "[预算收尾]停止新增工具查询。请用已有事实输出简短 final，明确未知原因和核查建议；"
-                    "修正全部质量问题，不确定就保留未知。最多3条事实、2条建议。"})
-                estimated_input = self.llm.estimate_input_tokens(messages)
-            output_limit = min(settings.AGENT_MAX_OUTPUT_TOKENS, remaining_tokens - estimated_input)
-            if output_limit < self.llm.minimum_output_tokens:
-                log_agent_step(run_id, step, "budget_preflight", json.dumps({
-                    "remaining": remaining_tokens, "estimated_input": estimated_input,
-                    "reason": "cannot_fit_request",
-                }))
-                stop_reason = STOP_TOKEN_BUDGET
-                break
-            log_agent_step(run_id, step, "budget_preflight", json.dumps({
-                "remaining": remaining_tokens, "estimated_input": estimated_input,
-                "max_output": output_limit, "final_only": final_only,
-            }))
-
-            t0 = time.perf_counter()
-            try:
-                resp = self.llm.chat(messages, timeout=min(settings.AGENT_STEP_TIMEOUT_SECONDS, remaining_seconds()),
-                                     max_tokens=output_limit)
-            except Exception as e:  # noqa: BLE001
-                failure = FailureInfo.from_exception(e)
-                llm_attempts += failure.attempts
-                llm_duration_ms += int((time.perf_counter() - t0) * 1000)
-                failure.retryable = failure.retryable and failure.retry_after_seconds < remaining_seconds()
-                retry_not_before = time.time() + failure.retry_after_seconds if failure.retryable else 0.0
-                error = failure.summary()
-                log_agent_step(run_id, step, "llm_error", error)
-                stop_reason = STOP_LLM_ERROR
-                break
-            latency = (time.perf_counter() - t0) * 1000.0
-            llm_calls += 1
-            llm_attempts += resp.attempts
-            llm_duration_ms += int(latency)
-            tokens_in += resp.tokens_in
-            tokens_out += resp.tokens_out
-            # 先保存已付费响应，哪怕随后触发总预算/期限，也可审计失败原因。
-            messages.append({"role": "assistant", "content": resp.content})
-            if remaining_seconds() <= 0:
-                stop_reason = STOP_TOTAL_TIMEOUT
-                break
-            if tokens_in + tokens_out > budget.token_limit:
-                stop_reason = STOP_TOKEN_BUDGET
-                break
-            log_agent_step(
-                run_id, step, "llm", resp.content[:300], round(latency, 2),
-                {"tokens_in": resp.tokens_in, "tokens_out": resp.tokens_out},
-            )
-
-            decision = _parse_decision(resp.content)
-            if not isinstance(decision, dict):
-                decision = {"type": "invalid"}
-            dtype = decision.get("type")
-            # 保存模型上一轮决策，避免上下文只有一串 user/tool 消息而没有决策轨迹。
-            hypothesis_id = investigation.apply_updates(decision)
-
-            if dtype == "tool_call":
-                if final_only:
-                    stop_reason = STOP_TOKEN_BUDGET
-                    break  # 模型忽略收尾要求，也不能继续查询、消耗下一轮预算。
-                tool, args = decision.get("tool", ""), decision.get("args") or {}
-                check_ownership(task_id, run_id)
-                result = self.registry.execute(tool, args, run_id=run_id, step=step)
-                tool_calls += 1
-                workflow.observe(tool, result)
-                call_id = investigation.observe_tool(step, tool, result, hypothesis_id)
-                if call_id:
-                    investigation.evidence[call_id]["args"] = args
-                    used_tools.append(tool)
-                tool_logs.append({
-                    "run_id": run_id,
-                    "step": step,
-                    "tool": tool,
-                    "args_json": json.dumps(args, ensure_ascii=False)[:2000],
-                    "result_summary": result.get("text", "")[:500],
-                    "rows": result.get("rows", 0),
-                    "latency_ms": result.get("_meta", {}).get("latency_ms", 0.0),
-                    "status": "ok" if result.get("ok") else "error",
-                })
-                append_tool_result(
-                    messages, tool, result, call_id=call_id,
-                    evidence=investigation.evidence.get(call_id) if call_id else None,
-                )
-                append_investigation_state(messages, investigation.snapshot())
-
-            elif dtype == "final":
-                candidate = _normalize_report(decision.get("report"))
-                quality = evaluate_report(candidate, investigation.evidence)
-                blockers = []
-                if not workflow.can_finalize():
-                    blockers.append("尚无任何成功的工具证据")
-                blockers.extend(quality["errors"])
-                if blockers and nudges < 2:
-                    nudges += 1
-                    messages.append({
-                        "role": "user",
-                        "content": (
-                            "final 未通过证据质量门槛，请修正后重试。问题："
-                            + "；".join(blockers[:8])
-                            + f"。当前进度: {workflow.progress_text()}。"
-                            "可以继续调用最能区分现有假设的工具；不要求固定调用全部工具。"
-                        ),
-                    })
-                else:
-                    if blockers:
-                        report = _partial_report()
-                        report["analysis"]["key_finding"] = "证据质量门槛未通过"
-                        report["analysis"]["quality_errors"] = blockers
-                        stop_reason = STOP_INSUFFICIENT_EVIDENCE
-                    else:
-                        report = candidate
-                        # 由服务端附加能力边界，不允许模型省略或伪造。
-                        report["analysis"]["evidence_limits"] = quality["evidence_limits"]
-                        report["analysis"]["limitations"] = list(dict.fromkeys(
-                            report["analysis"]["limitations"] + list(quality["evidence_limits"].values())
-                        ))
-                        stop_reason = STOP_FINAL
-                    resume_at = step + 1
-                    break
-
-            else:
-                raw = str(decision.get("raw") or "")
-                log_agent_step(
-                    run_id, step, "invalid_json",
-                    f"len={len(raw)} head={raw[:300]} tail={raw[-300:]}",
-                )
-                messages.append({
-                    "role": "user",
-                    "content": (
-                        "上一响应不是完整合法 JSON，可能被截断。请重新输出更紧凑的单个 JSON；"
-                        "reasoning/statement/expected_evidence 各不超过80字，type 只能是 tool_call 或 final。"
-                    ),
-                })
-
-            messages = compact_context(messages, investigation)
-            resume_at = step + 1
-            retry_not_before = 0.0
-            # 只在整个步骤完成后落盘，保证恢复点不会包含半写入的工具结果。
+        def save_graph_step(loop: LoopState) -> None:
             save_checkpoint(
                 run_id=run_id, task_id=task_id, item_id=item_id, start=start, end=end,
-                anomaly_id=anomaly_id, step=step, state=checkpoint_state(step + 1),
+                anomaly_id=anomaly_id, step=loop.steps,
+                state=checkpoint_state(loop.resume_at, loop),
             )
 
-            if remaining_seconds() <= 0:
-                stop_reason = STOP_TOTAL_TIMEOUT
-                break
-
-        else:  # for-else：正常走完循环未 break
-            stop_reason = STOP_MAX_STEPS
-            report = _partial_report()
+        context = InvestigationContext(
+            llm=self.llm, registry=self.registry, budget=budget, run_id=run_id,
+            remaining_seconds=remaining_seconds,
+            check_owner=lambda: check_ownership(task_id, run_id), save_step=save_graph_step,
+            parse_decision=_parse_decision, normalize_report=_normalize_report,
+            partial_report=_partial_report, log_step=log_agent_step, clock=time,
+            max_output_tokens=settings.AGENT_MAX_OUTPUT_TOKENS,
+            step_timeout_seconds=settings.AGENT_STEP_TIMEOUT_SECONDS,
+        )
+        final_state = self.graph.invoke(LoopState(
+            messages=messages,
+            investigation=investigation,
+            workflow=workflow,
+            steps=steps,
+            tool_calls=tool_calls,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            llm_calls=llm_calls,
+            llm_attempts=llm_attempts,
+            llm_duration_ms=llm_duration_ms,
+            nudges=nudges,
+            stop_reason=stop_reason,
+            report=report,
+            error=error,
+            quality=quality,
+            tool_logs=tool_logs,
+            used_tools=used_tools,
+            next_step=next_step,
+            resume_at=resume_at,
+            retry_not_before=retry_not_before,
+            failure=failure
+        ), context=context)
+        messages = final_state.messages
+        investigation = final_state.investigation
+        workflow = final_state.workflow
+        steps = final_state.steps
+        tool_calls = final_state.tool_calls
+        tokens_in = final_state.tokens_in
+        tokens_out = final_state.tokens_out
+        llm_calls = final_state.llm_calls
+        llm_attempts = final_state.llm_attempts
+        llm_duration_ms = final_state.llm_duration_ms
+        nudges = final_state.nudges
+        stop_reason = final_state.stop_reason
+        report = final_state.report
+        error = final_state.error
+        quality = final_state.quality
+        tool_logs = final_state.tool_logs
+        used_tools = final_state.used_tools
+        next_step = final_state.next_step
+        resume_at = final_state.resume_at
+        retry_not_before = final_state.retry_not_before
+        failure = final_state.failure
 
         if report is None:
             report = _partial_report(stop_reason)

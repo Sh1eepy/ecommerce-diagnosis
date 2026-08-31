@@ -13,6 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from app.config import settings
 from app.db import write_session
 from app.llm import get_llm
+from app.llm.langchain_adapter import invoke_chat
 from app.models import AgentRun, AnomalyEvent, DiagnosticReport, ReportReview, ReviewDraft
 
 
@@ -127,7 +128,7 @@ def extract_draft(run_id: str, payload: FeedbackInput, principal: str) -> dict:
             if output_limit < 512:
                 error = "input_budget_exceeded"
             else:
-                response = client.chat(messages, timeout=settings.FEEDBACK_LLM_TIMEOUT_SECONDS, max_tokens=output_limit)
+                response = invoke_chat(client, messages, timeout=settings.FEEDBACK_LLM_TIMEOUT_SECONDS, max_tokens=output_limit)
                 tin, tout = response.tokens_in, response.tokens_out
                 if tin + tout > settings.FEEDBACK_LLM_TOKEN_BUDGET:
                     error = "token_budget"

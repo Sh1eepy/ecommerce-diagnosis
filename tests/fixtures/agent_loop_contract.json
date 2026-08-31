@@ -1,0 +1,84 @@
+{
+  "adaptive": {
+    "status": "ok",
+    "stop_reason": "final",
+    "steps": 3,
+    "tool_calls": 2,
+    "llm_requests": 3,
+    "requests_sha256": "b304fd353e0f8d59478d2dceda42d065e0f4a052161d380aa80a618f1b6d7ee1",
+    "result_sha256": "bcc9812d680e5e90b8b29467f612d6876795dc2b3bead3b4812090297daf8b36",
+    "checkpoint_status": "completed",
+    "checkpoint_sha256": "407b5445f7dec65581213d741cef1e3add00f65a0e6371a96fc929e3de9428d0"
+  },
+  "corrected": {
+    "status": "ok",
+    "stop_reason": "final",
+    "steps": 3,
+    "tool_calls": 1,
+    "llm_requests": 3,
+    "requests_sha256": "dbe775948a37dcd8f05b4c082506d9aeb1d07e24dd26870e1f4be0c8ebf69083",
+    "result_sha256": "1b1bd6d98f464460d1d8762a8e1e6e5d7201dd5d6e02efb3197699d75d03e32f",
+    "checkpoint_status": "completed",
+    "checkpoint_sha256": "7b352484033affd9f95c46e8e7f5d3d377e1e19b72efda2aa83b7636a2150534"
+  },
+  "rejected": {
+    "status": "incomplete",
+    "stop_reason": "insufficient_evidence",
+    "steps": 4,
+    "tool_calls": 1,
+    "llm_requests": 4,
+    "requests_sha256": "5b2e65a9b9b4aa038e6c50bf13de7f3273fbbcb28025f253e17da670c87cf5c7",
+    "result_sha256": "44129b12ebe85fc69183a1980d4015543310c7974198bfe7398004aaf2ac2a95",
+    "checkpoint_status": "stopped",
+    "checkpoint_sha256": "6771bbf851fbe860db3ed44f070b1fc4dadc3767e8114152783f87dc03fd45b6"
+  },
+  "invalid": {
+    "status": "ok",
+    "stop_reason": "final",
+    "steps": 3,
+    "tool_calls": 1,
+    "llm_requests": 3,
+    "requests_sha256": "1d39851ef76b6d634564d3a9b0371ecd04d48018eb1e474be845f907c1981a7f",
+    "result_sha256": "d343654ece47abec86960444ae8dc726da01cce98336a0a340611ffabba7885a",
+    "checkpoint_status": "completed",
+    "checkpoint_sha256": "e1f7d2d9f3c6133ccca2e7553fa1d5d750995f4edbe24827fe0fec1d4be42f6c"
+  },
+  "tool_error": {
+    "status": "ok",
+    "stop_reason": "final",
+    "steps": 3,
+    "tool_calls": 2,
+    "llm_requests": 3,
+    "requests_sha256": "4539c5ece3e6c9abe071c09fbd221d460151995e75980f8f99bd280aa1e8d3cd",
+    "result_sha256": "e07e8cfb42f04e05a2e8c27151ed5fce4cbce26cfac6beeb8421451e705783c5",
+    "checkpoint_status": "completed",
+    "checkpoint_sha256": "2e9eca57c35aeddde56b117a18b0f0435d14ada9391f2e882c86a3cde8126927"
+  },
+  "max_steps": {
+    "status": "incomplete",
+    "stop_reason": "max_steps",
+    "steps": 8,
+    "tool_calls": 8,
+    "llm_requests": 8,
+    "requests_sha256": "72e3cb58b144c02476156cb72ed4f1ce4a2f5f5cbdec3296057d279c4aed23b8",
+    "result_sha256": "34fba6a504450434fb07c9fbd8f37074f065ce2f5e00251aa70eda7ca3899202",
+    "checkpoint_status": "stopped",
+    "checkpoint_sha256": "1a6e74d82b1193c04781c9ed620fcfab647f4e8cab706a21baba0f8f5ef8f49d"
+  },
+  "budget": {
+    "status": "incomplete",
+    "stop_reason": "token_budget",
+    "steps": 2,
+    "tool_calls": 1,
+    "llm_requests": 1,
+    "requests_sha256": "36d99b61eb2ab2c85734f32972b8324017ad951f341017cbc6491f306c74cf8d",
+    "result_sha256": "416cbbc2f07ade9e3ef56b17457ecb915146e7a8b853b025aeb14f9294d37372",
+    "checkpoint_status": "stopped",
+    "checkpoint_sha256": "2576672fb94251416a4e3e3366a82d0b0fe2e0d08f21f6244377dd7a47325c35"
+  },
+  "_provenance": {
+    "source_commit": "081f9c0d11672d9ccff0361e49c7d3e1949b6979",
+    "source_agent_sha256_lf": "df295d11f35034920446ee1b64970c465633873264fe4b87a3b9faaff2d86171",
+    "method": "Pre-migration Agent executed with isolated SQLite, scripted models and fixed clock; omit random run_id and nondeterministic latency."
+  }
+}

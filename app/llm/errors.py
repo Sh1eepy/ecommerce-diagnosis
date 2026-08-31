@@ -1,5 +1,9 @@
 """错误分类和安全的失败元数据；不在此处执行重试。"""
+import math
 import ssl
+from datetime import timezone
+from email.utils import parsedate_to_datetime
+from time import time
 from typing import Literal
 
 import httpx
@@ -71,6 +75,32 @@ def classify_llm_exception(error: Exception) -> ErrorKind:
             cause = cause.__cause__ or cause.__context__
         return "retryable" if transient else "unknown"
     return "unknown"
+
+
+def retry_after_seconds(error: Exception, *, now: float | None = None) -> float | None:
+    """共享 OpenAI 兼容响应的服务端等待解析；不在这里执行重试。"""
+    if not isinstance(error, APIStatusError):
+        return None
+    headers = error.response.headers
+    for name, divisor in (("retry-after-ms", 1000.0), ("retry-after", 1.0)):
+        raw = headers.get(name)
+        if raw is None:
+            continue
+        try:
+            seconds = float(raw) / divisor
+        except (ValueError, TypeError, OverflowError):
+            if name != "retry-after":
+                continue
+            try:
+                parsed = parsedate_to_datetime(raw)
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                seconds = parsed.timestamp() - (time() if now is None else now)
+            except (ValueError, TypeError, OverflowError, OSError):
+                continue
+        if math.isfinite(seconds) and seconds >= 0:
+            return seconds
+    return None
 
 
 class LLMCallError(RuntimeError):
